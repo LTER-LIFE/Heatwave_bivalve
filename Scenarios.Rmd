@@ -241,10 +241,12 @@ plot(por, grid=Grid, xyswap=TRUE, xlim=c(0,1), ylim=c(0.1,0), xlab="Porosity", y
 ```
 
 Alternative: sandy sediment
+- Attenuation coefficient range between 50 and 300;
+- deep porosity 0.45 can also be changed
+- Surface porosity can be changed from 1 (assume there is always a thin water layer at surface) to 0.9
 ```{r}
-
 require(ReacTran)
-porfun <- function(x) return(0.45 + (1-0.45) * exp(-x*50))
+porfun <- function(x) return(0.45 + (1-0.45) * exp(-x*300))
 
 length.z <- 10
 dz.1     <- 1e-4
@@ -636,7 +638,7 @@ Tout_shifted <- lapply(fHeight_shifted_list, function(fH) {
 # 3 cm
 cols <- c("blue", "green", "black", "orange", "red")
 
-png(paste0(wd,"/Graphs/3cm_TideShift.png"),width=600, height =450, units = "px")
+# png(paste0(wd,"/Graphs/3cm_TideShift.png"),width=600, height =450, units = "px")
 plot(NULL, NULL,
      xlim = range(Tout_shifted[[1]][,"time"])/3600,
      ylim = c(10, 35),
@@ -652,10 +654,10 @@ for (i in seq_along(Tout_shifted)) {
 
 legend("topright", legend = paste(shift_hours, "h"),
        col = cols, lwd = 2, title = "Water height shift")
-dev.off()
+# dev.off()
 ### 15 cm
 
-png(paste0(wd,"/Graphs/15cm_TideShift.png"),width=600, height =450, units = "px")
+# png(paste0(wd,"/Graphs/15cm_TideShift.png"),width=600, height =450, units = "px")
 cols <- c("blue", "green", "black", "orange", "red")
 
 plot(NULL, NULL,
@@ -673,7 +675,7 @@ for (i in seq_along(Tout_shifted)) {
 
 legend("topright", legend = paste(shift_hours, "h"),
        col = cols, lwd = 2, title = "Water height shift")
-dev.off()
+# dev.off()
 ```
 
 
