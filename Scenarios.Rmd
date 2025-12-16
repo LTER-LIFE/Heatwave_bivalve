@@ -19,7 +19,7 @@ knitr::opts_chunk$set(
 
 
 ```{r message=FALSE}
-# devtools::install_github("dynamic-R/TempSED", depend=TRUE)
+# devtools::install_github("dynamic-R/TempSED", depend=TRUE, build.vignettes=TRUE)
 # require(sedTemp)
 require(TempSED)
 require(deSolve)
@@ -31,6 +31,8 @@ require(stringr)
 require(ncdf4) #for dealing with netCDF data (metero data)
 SL <- Sys.getlocale("LC_TIME")
 Sys.setlocale("LC_TIME", "C")
+
+require(plot3D)
 ```
 
 # 2. Save all the data so we don't have to run data processing again
@@ -38,7 +40,7 @@ Sys.setlocale("LC_TIME", "C")
 #sed T observation
 # save(Mok_data, file = "../data/DataQing/Mok_data.rda")
 # your working directory
-wd <- "C:\\Users\\qzhan\\OneDrive - NIOZ\\Attachments\\01_LTER-LIFE\\04_Bivalve_larvea\\Modelling\\Heatwave_bivalve"
+wd <- "C:\\Users\\qzhan\\OneDrive - NIOZ\\Attachments\\01_LTER-LIFE\\04_Bivalve\\Modelling\\Heatwave_bivalve"
 load(paste0(wd, "/DataQing/Mok_data.rda"))
 
 #weather forcings
@@ -908,7 +910,7 @@ legend("topright", legend = names(Tout_shifted), col = cols, lwd = 2, title = "S
 ```
 
 
-##### 4.2.4.2 Increased water temperature
+#### 4.2. Increased water temperature
 
 ```{r}
 ### --- 1. Helper: circular shift of forcing by hours ---
@@ -1103,3 +1105,63 @@ legend("topright", legend = names(Tout_shifted), col = cols, lwd = 2, title = "S
 
 ```
 No differences when changing air temperature?? -> Reply: because the averaged water height is always greater than zero, meaning it is always submerged. So water temperature is influencing sediment temperature, but not air temperature.
+
+# 5. Visualization
+## 5.1  a function to plot daily average temperature profiles
+Plot_DailyAverageT <- function(Data=Tout.wad_A_A, title1="", title2=""){
+#par(oma=c(2,0,0,0), mar=c(4,4,4,2), cex=1.5)
+Temp <- subset(Data, which="Temperature")
+times <- Data[,1]
+DT.times <- as.POSIXct(times, origin=as.POSIXct("2018-08-07 00:00:00", tz = "CET"))
+DT.d <- as.Date(DT.times, tz = "CET")
+
+Jul  <- julian(DT.d)
+Tday <- NULL
+for (i in 1:ncol(Temp)){
+  Tday <- cbind(Tday, tapply(Temp[,i], INDEX=Jul, FUN=mean))
+}
+#Tday is a dataframe whose columns are 100 layers and rows are 366 days
+DT.day <- unique(DT.d)
+#DT.day is date from 2021-10-31 to 2022-10-31
+Grid <- attributes(Data)$grid
+
+par(mar = c(2, 1, 3, 3))
+image2D(
+  x = DT.day,
+  y = Grid$x.mid,
+  z = Tday,
+  ylim = c(10, 0),
+  las = 1,
+  xaxt = "n",
+  yaxt = "n",
+  main = title1,
+  clab = "°C",
+  contour = list(levels = c(0, 5, 10, 12.5, 15, 20, 25, 30), labcex = 1.2),
+  zlim = c(0, 30),
+  colkey = list(dist = 0.08)  # default is 0, increase to move right
+)
+
+
+axis(1, at = c(DT.day[1], DT.day[length(DT.day)/3], DT.day[length(DT.day)*2/3], DT.day[length(DT.day)]), labels = c("Nov","Mar","Jul","Nov"), las = 1)
+
+axis(2, at=seq(10,0, by=-2), labels = FALSE)
+
+#axis.POSIXct(1,at = seq(from = DT.day[1],to = DT.day[length(DT.day)],by = "4 months"), format = "%b", las=1)  
+
+par(mar = c(4, 1, 2, 4))  # Add space on right side for color key
+matplot(y = Grid$x.mid, x = t(Tday), type = "l", main = title2, las = 1,
+        col = jet.col(367), ylim = c(10, 0), xlim = c(0, 25),
+        xaxs = "i", lty = 1, yaxt = "n", xlab = "Temperature (°C)", yaxs = "i")
+
+axis(2, at = seq(10, 0, by = -2), labels = FALSE)
+
+colkey(col = jet.col(367),
+       clim = c(0, 365),
+       clab = c("", "Day"),
+       add = TRUE,
+       dist = 0.05,         # Positive distance → right of plot
+       length = 0.5,
+       cex.clab = 0.7,
+       at = c(0, 100, 200, 300))
+}
+Plot_DailyAverageT(out)
