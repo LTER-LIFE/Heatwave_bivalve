@@ -1,7 +1,7 @@
 ---
-title: "Scenario"
-author: "Qing"
-date: "2025-10-20"
+title: "Sediment temperature model scenarios for Wadden Sea bivalve habitats"
+author: ""
+date: ""
 output:
   html_document:
     df_print: paged
