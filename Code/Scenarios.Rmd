@@ -1,0 +1,2105 @@
+---
+title: "Sediment temperature model scenarios for Wadden Sea bivalve habitats"
+author: ""
+date: ""
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  fig.align = 'center',  # Center all figures
+  tidy.opts = list(width.cutoff = 60),
+  tidy = TRUE
+)
+```
+
+
+```{r message=FALSE}
+# devtools::install_github("dynamic-R/TempSED", depend=TRUE, build.vignettes=TRUE)
+# require(sedTemp)
+require(TempSED)
+require(deSolve)
+require(rootSolve)
+require(ReacTran) # for setup.grid.1D function
+require(readxl) # for reading sediment temperature sensor xlsx data
+require(dplyr)
+require(stringr)
+require(ncdf4) #for dealing with netCDF data (metero data)
+SL <- Sys.getlocale("LC_TIME")
+Sys.setlocale("LC_TIME", "C")
+
+require(plot3D)
+```
+
+# 2. Save all the data so we don't have to run data processing again
+```{r}
+#sed T observation
+# save(Mok_data, file = "../data/DataQing/Mok_data.rda")
+# your working directory
+wd <- "C:\\Users\\qzhan\\OneDrive - NIOZ\\Attachments\\01_LTER-LIFE\\04_Bivalve\\Modelling\\Heatwave_bivalve"
+load(paste0(wd, "/DataQing/Mok_data.rda"))
+
+#weather forcings
+# save(ForcingsDeKooyAirport, file = "../data/DataQing/ForcingsDeKooyAirport.rda")
+load(paste0(wd, "/DataQing/ForcingsDeKooyAirport.rda"))
+
+#water forcings from RWS
+# save(WaterForcingsRWSWaddenSea, file = "../data/DataQing/WaterForcingsRWSWaddenSea.rda")
+load(paste0(wd, "/DataQing/WaterForcingsRWSWaddenSea.rda"))
+```
+
+# 3.Model-data fit
+
+## 3.1 Create forcing functions
+
+### 3.1.1 Meteo functions
+```{r}
+# Forcing functions
+fWind_WaS.wad      <-   ForcingsDeKooyAirport[,c("Second", "windSpeed")]
+fRad_WaS.wad       <-   ForcingsDeKooyAirport[,c("Second", "radiation")]
+fTair_WaS.wad      <-   ForcingsDeKooyAirport[,c("Second", "airTemperature")]
+fPair_WaS.wad      <-   ForcingsDeKooyAirport[,c("Second", "airPressure")]
+fHumidity_WaS.wad  <-   ForcingsDeKooyAirport[,c("Second", "airHumidity")]
+fCloud_WaS.wad     <-   ForcingsDeKooyAirport[,c("Second", "cloudCover")]
+```
+
+### 3.1.2 Water level functions
+```{r}
+# Set the origin date-time
+origin <- as.POSIXct("2018-08-07 00:00:00", tz = "CET")
+
+# Function to process the water level data for Vvk or Balgzand and return only the required columns
+process_water_level <- function(data, station_name, depth_offset) {
+  # Convert Time to seconds
+  data$Second <- as.double(julian(data$Time, origin = origin) * 86400)
+  
+  # Adjust water level values based on the station (Vvk or Balgzand)
+  data$H.m <- (data$NUMERIEKEWAARDE - depth_offset) / 100
+  
+  # Replace negative water level values with 0
+  data$H.m[data$H.m < 0] <- 0
+  
+  # Keep only the columns 'Second' and 'H.m'
+  data <- data[, c("Second", "H.m")]
+  
+  return(data)
+}
+
+# Process the data
+
+
+#2. use Den Helder, veersteiger water H
+# For A station
+fHeight_A_Den.wad <- process_water_level(WaterForcingsRWSWaddenSea$`Den Helder, veersteiger`$WaterLevel, "A", -9)
+
+# # For B station
+fHeight_B_Den.wad <- process_water_level(WaterForcingsRWSWaddenSea$`Den Helder, veersteiger`$WaterLevel, "B", -33)
+
+# # For D station
+# fHeight_D_Den.wad <- process_water_level(WaterForcingsRWSWaddenSea$`Den Helder, veersteiger`$WaterLevel, "D", -74)
+
+
+# View the processed data
+
+
+head(fHeight_A_Den.wad)
+head(fHeight_B_Den.wad)
+# head(fHeight_D_Den.wad)
+
+```
+
+### 3.1.3 Water T function
+```{r}
+# Function to process the water temperature data for "Monding Nieuwe Haven" and return only the required columns
+process_temperature_data <- function(data) {
+  # Convert Time to seconds
+  data$Second <- as.double(julian(data$Time, origin = origin) * 86400)
+  
+  data$Temperature <- data$NUMERIEKEWAARDE
+  
+  # Keep only the columns 'Second' and 'Temperature'
+  data <- data[, c("Second", "Temperature")]
+  
+  return(data)
+}
+
+# Process the data for 'Den Helder, veersteiger'
+fTwater_Den.wad <- process_temperature_data(WaterForcingsRWSWaddenSea$`Den Helder, veersteiger`$Temperature)
+
+# View the processed data
+head(fTwater_Den.wad)
+```
+
+
+
+
+```{r}
+# --- Generate in-memory fTwater_*.wad data frames from Mok_data ---
+generate_fTwater_data <- function(Mok_data) {
+  library(dplyr)
+  
+  stopifnot(all(c("Station", "Depth", "Second", "Temperature") %in% names(Mok_data)))
+  
+  # Normalize time to start at 0
+  Mok_data <- Mok_data %>%
+    mutate(Second = Second - min(Second, na.rm = TRUE))
+  
+  # Function to extract by station
+  extract_station <- function(station) {
+    Mok_data %>%
+      filter(Station == station, Depth == 2) %>%
+      arrange(Second) %>%
+      select(Second, Temperature)
+  }
+  
+  # Create each data frame
+  fTwater_A.wad <- extract_station("A")
+  fTwater_B.wad <- extract_station("B")
+  fTwater_D.wad <- extract_station("D")
+  
+  # Return all as a named list (and keep also as objects in global env)
+  assign("fTwater_A.wad", fTwater_A.wad, envir = .GlobalEnv)
+  assign("fTwater_B.wad", fTwater_B.wad, envir = .GlobalEnv)
+  assign("fTwater_D.wad", fTwater_D.wad, envir = .GlobalEnv)
+  
+  message("✅ Created in-memory data frames: fTwater_A.wad, fTwater_B.wad, fTwater_D.wad")
+  
+  invisible(list(A = fTwater_A.wad,
+                 B = fTwater_B.wad,
+                 D = fTwater_D.wad))
+}
+
+# ---- Example usage ----
+result <- generate_fTwater_data(Mok_data)
+
+# Access them directly:
+head(fTwater_A.wad)
+head(fTwater_B.wad)
+head(fTwater_D.wad)
+
+```
+
+
+## 3.2 Create observation data
+```{r}
+# Function to create the observation data from SedTempDataWaddenSea
+create_observation_data <- function(data, station_name, depth) {
+  # Filter the data by the given station and depth
+  station_data <- subset(data, Station == station_name & Depth == depth)
+  
+  # Create a new data frame with the 'Time' and 'Temperature' columns
+  obs_data <- data.frame(
+    Time = station_data$DateTime,         # Use DateTime as Time
+    Temperature = station_data$Temperature  # Use Temperature as Temperature
+  )
+  
+  # Return the resulting data frame
+  return(obs_data)
+}
+
+
+# Create Obsdat_Mokbai from SedTempDataWaddenSea
+Obsdat_A_3cm <- create_observation_data(Mok_data, "A", 3)
+Obsdat_A_15cm <- create_observation_data(Mok_data, "A", 15)
+
+# Create Obsdat_Mokbai from SedTempDataWaddenSea
+Obsdat_B_3cm <- create_observation_data(Mok_data, "B", 3)
+Obsdat_B_15cm <- create_observation_data(Mok_data, "B", 15)
+
+# Obsdat_D_3cm <- create_observation_data(Mok_data, "D", 3)
+# Obsdat_D_15cm <- create_observation_data(Mok_data, "D", 15)
+
+# View the first few rows of Obsdat_Vvk and Obsdat_Balgzand
+head(Obsdat_A_3cm)
+head(Obsdat_B_3cm)
+# head(Obsdat_D_3cm)
+
+head(Obsdat_A_15cm)
+head(Obsdat_B_15cm)
+# head(Obsdat_D_15cm)
+```
+
+### 3.3.1 Onshore station A
+
+#### Porosity Parameters
+
+The initial guess of parameters are from muddy sediment (Zandkreek) fitting of Ricky's data
+
+```{r}
+
+require(ReacTran)
+porfun <- function(x) return(0.45 + (1-0.45) * exp(-x*50))
+
+length.z <- 10
+dz.1     <- 1e-4
+
+Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z)
+por      <- setup.prop.1D(func=porfun, grid=Grid)
+
+plot(por, grid=Grid, xyswap=TRUE, xlim=c(0,1), ylim=c(0.1,0), xlab="Porosity", ylab="Depth(m)", t="l"); abline(h=0, lty=2)
+```
+
+Alternative: sandy sediment
+- Attenuation coefficient range between 50 and 300;
+- deep porosity 0.45 can also be changed
+- Surface porosity can be changed from 1 (assume there is always a thin water layer at surface) to 0.9
+```{r}
+require(ReacTran)
+porfun <- function(x) return(0.45 + (1-0.45) * exp(-x*300))
+
+length.z <- 10
+dz.1     <- 1e-4
+
+Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z)
+por      <- setup.prop.1D(func=porfun, grid=Grid)
+
+plot(por, grid=Grid, xyswap=TRUE, xlim=c(0,1), ylim=c(0.1,0), xlab="Porosity", ylab="Depth(m)", t="l"); abline(h=0, lty=2)
+```
+
+```{r}
+# parameters
+emAir     = 0.8        # [-]        emissivity of air
+emSed     = 0.95*1       # [-]        emissivity of sediment
+stanton   = 0.001*1      # [-]        transfer coeff for sensible heat
+dalton    = 0.0014*1     # [-]        transfer coeff for latent heat
+dependencyT = FALSE
+densWater = 1024       # [kg/m3]    seawater density
+densSolid = 2500       # [kg/m3]    sediment dry density
+cpWater   = 3994       # [J/kg/dgC] specific heat capacity water
+cpSolid   = 700       # [J/kg/dgC] specific heat capacity solid (dry sediment)* 
+#518-907 
+#the higher, model value in winter will be higher, in summer will be lower
+#not as sensitive as tcsolid, 700-900 like the same
+#850 is too high, 700 will make the summer deep sediment fit good
+tcWater   = 0.6        # [W/m/dg]   thermal conductivity of water 
+tcSolid   = 7        # [W/m/dg]   thermal conductivity of solid* #1.68-19.21
+#the higher, model value will be lower in winter, higher in summer #6-7 is best, and it influences deeper layers the most)
+albedoWater = 0.05     # [-] part light reflected by water
+albedoSed = 0.1       # [-] part light reflected by sediment*(0.1-0.3, no big difference)
+#make it 0.3, radiation into sediment would be too low, modeled T would be too low
+kdWater   = 1        # [/m] light attenuation coefficient water (1-25/m in RT13)
+#from 1 to 25, no difference at all?
+kdSed     = 1000      # [/m] light attenuation coefficient (bulk) sediment(no difference from 1000 to 5000)
+#make it 10000, the effect is same with increasing albedoSed, winter overshooting is still there, but summer is too low
+
+# name=c("Mineral", "Density", "Thermal conductivity", "Thermal diffusivity", "Specific heat",  "Heat capacity"),
+#  unit=c("-", "1000 kg/m3", "(W/m/K)", "(10-6 m2/s)", "(1000 J/kg/K)", "(10^6 J/m3/K)"))
+#c("Quartz",     2.648, "a",  7.69, "b", 3.92, "i", 0.741, "c", 1.96, "i"),
+#c("Orthoclase", 2.570, "a",  2.32, "b", 1.28, "i", 0.707, "c", 1.82, "i"),
+#c("Albite",     2.620, "a",  2.14, "b", 1.05, "i", 0.776, "c", 2.03, "i"),
+#c("Anorthite",  2.760, "a",  1.68, "b", 0.817,"i", 0.745, "c", 2.06, "i"),
+#c("Calcite",    2.710, "a",  3.59, "b", 1.62, "i", 0.820, "c", 2.22, "i"),
+#c("Muscovite",  2.831, "a",  2.32, "b", 1.03, "f", 0.796, "i", 2.25, "i"),
+#c("Illite",     2.660, "a",  1.85, "d", 0.861,"i", 0.808, "e", 2.15, "i"),
+#c("Smectite (montmorillonite)",2.608,"a",1.88,"d", 0.907, "i", 0.795, "e",2.07,"i"),
+#c("Chlorite",   2.800, "a",  5.15, "b", 2.25, "f", 0.818, "i", 2.29, "i"),
+#c("Pyrite",     5.011, "a", 19.21, "b", 7.40, "i", 0.518, "g", 2.60, "i"),
+#c("Seawater",   1.025, "h", 0.596, "h",0.146, "h", 3.993, "h", 4.093, "i")
+```
+
+#### Output hourly
+
+```{r}
+
+find_time_comparison_function <- function(forcing_list) {
+  # Initialize variables to store the latest start time and earliest end time
+  latest_start_time <- -Inf
+  earliest_end_time <- Inf
+  latest_start_function <- NULL
+  earliest_end_function <- NULL
+  
+  # Loop over the list of functions and compare start and end times
+  for (function_name in names(forcing_list)) {
+    df <- forcing_list[[function_name]]
+    
+    # Get the first and last value of the "Second" column, first column
+    first_second <- min(df[,1])
+    last_second <- max(df[,1])
+    
+    # Check if this function starts later than the current latest start time
+    if (first_second > latest_start_time) {
+      latest_start_time <- first_second
+      latest_start_function <- function_name
+    }
+    
+    # Check if this function ends earlier than the current earliest end time
+    if (last_second < earliest_end_time) {
+      earliest_end_time <- last_second
+      earliest_end_function <- function_name
+    }
+  }
+  
+  # Return the result as a named list
+  list(
+    LatestStartFunction = latest_start_function,
+    FirstSecond = latest_start_time,
+    EarliestEndFunction = earliest_end_function,
+    LastSecond = earliest_end_time
+  )
+}
+
+
+```
+
+```{r}
+
+# Example usage with the forcing functions list
+forcing_functions <- list(
+  f_Pressure = fPair_WaS.wad,
+  f_Airtemperature = fTair_WaS.wad,
+  f_Waterheight = fHeight_A_Den.wad,
+  f_Watertemperature = fTwater_A.wad, # instead of den Helder RWS WT, we used sensor measured interface water temperature at + 2cm
+  f_Qrel = fHumidity_WaS.wad,
+  f_Solarradiation = fRad_WaS.wad,
+  f_Windspeed = fWind_WaS.wad,
+  f_Cloudiness = fCloud_WaS.wad
+)
+
+find_time_comparison_function(forcing_functions)
+
+
+```
+so we should start from 7200 seconds to 1208700 seconds
+
+```{r}
+# --- Convert each forcing .wad object to numeric double matrix (in place) ---
+
+# Helper: convert data.frame to numeric matrix with 2 columns (time, value)
+to_forcing_matrix <- function(df) {
+  stopifnot(ncol(df) >= 2)
+  m <- cbind(
+    as.numeric(df[[1]]),
+    as.numeric(df[[2]])
+  )
+  storage.mode(m) <- "double"
+  m
+}
+
+# List all forcing variable names you want to process
+# For station A
+forcing_names <- c(
+  "fPair_WaS.wad",
+  "fTair_WaS.wad",
+  "fHeight_A_Den.wad",
+  "fTwater_A.wad",
+  "fHeight_B_Den.wad",
+  "fTwater_B.wad",
+  "fHumidity_WaS.wad",
+  "fRad_WaS.wad",
+  "fWind_WaS.wad",
+  "fCloud_WaS.wad"
+)
+
+# Loop through and overwrite each variable in the global environment
+for (nm in forcing_names) {
+  if (exists(nm, envir = .GlobalEnv)) {
+    obj <- get(nm, envir = .GlobalEnv)
+    if (is.data.frame(obj)) {
+      assign(nm, to_forcing_matrix(obj), envir = .GlobalEnv)
+      message("✅ Converted to double matrix: ", nm)
+    } else {
+      message("⚠️ Skipped (not a data.frame): ", nm)
+    }
+  } else {
+    message("⚠️ Object not found: ", nm)
+  }
+}
+
+# ✅ After this, each e.g. fTwater_A.wad, fRad_WaS.wad, etc. is now:
+# num [1:..., 1:2]  (double matrix)
+# ready for:  forcings = list(fWaterTemp = fTwater_A.wad, ...)
+
+```
+
+```{r}
+times  <- seq(from=7200, to=1208700, by=3600) 
+
+#use A water H
+# Tout.wad_A_A <- sedTemp1D(length.z=length.z, dz.1=dz.1,
+#                            Temp.ini=20,      Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z), times=times, porosity=porfun,
+#                dependencyT = dependencyT,cpSolid=cpSolid,
+#                tcSolid=tcSolid,
+#                emAir = emAir,
+#                emSed = emSed,
+#                dalton = dalton,
+#                stanton = stanton,
+#                albedoSed=albedoSed,
+#                kdWater = kdWater,
+#                albedoWater = albedoWater,
+#                fPressure=fPair_WaS.wad,
+#                fAirTemperature=fTair_WaS.wad, 
+#                fWaterHeight=fHeight_A_Den.wad,
+#                fWaterTemp=fTwater_A.wad, 
+#                fAirHumidity=fHumidity_WaS.wad
+#                fSolarRadiation=fRad_WaS.wad, 
+#                fWindSpeed=fWind_WaS.wad, 
+#                fCloudiness = fCloud_WaS.wad,sedpos=c(0, 0.03, 0.15))
+
+Tout.wad_A_A <- TempSED_run1D(z_max=length.z, dz_1=dz.1,
+                           T_ini=20,      Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z), times=times, porosity=porfun,
+               dependency_on_T = dependencyT,
+               parms = list(cp_solid=cpSolid,
+                            tc_solid =tcSolid,
+                            em_air = emAir, 
+                            dalton = dalton,
+                            stanton = stanton,
+                            albedo_sediment =albedoSed,
+                            kd_water = kdWater,
+                            albedo_water = albedoWater),
+               f_Pressure=fPair_WaS.wad,
+               f_Airtemperature=fTair_WaS.wad, 
+               f_Waterheight=fHeight_A_Den.wad,
+               f_Watertemperature=fTwater_A.wad, 
+               f_Qrel=fHumidity_WaS.wad,
+               f_Solarradiation=fRad_WaS.wad, 
+               f_Windspeed=fWind_WaS.wad, 
+               f_Cloudiness = fCloud_WaS.wad,sedpos=c(0, 0.03, 0.15))
+
+Tout.wad_B_B <- TempSED_run1D(z_max=length.z, dz_1=dz.1,
+                           T_ini=20,      Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z), times=times, porosity=porfun,
+               dependency_on_T = dependencyT,
+               parms = list(cp_solid=cpSolid,
+                            tc_solid =tcSolid,
+                            em_air = emAir, 
+                            dalton = dalton,
+                            stanton = stanton,
+                            albedo_sediment =albedoSed,
+                            kd_water = kdWater,
+                            albedo_water = albedoWater),
+               f_Pressure=fPair_WaS.wad,
+               f_Airtemperature=fTair_WaS.wad, 
+               f_Waterheight=fHeight_B_Den.wad,
+               f_Watertemperature=fTwater_B.wad, 
+               f_Qrel=fHumidity_WaS.wad,
+               f_Solarradiation=fRad_WaS.wad, 
+               f_Windspeed=fWind_WaS.wad, 
+               f_Cloudiness = fCloud_WaS.wad,sedpos=c(0, 0.03, 0.15))
+
+```
+
+#### A function to show 10cm band of model data fitting
+
+
+```{r}
+ModelBandDataPlot <- function(out, Tsed="Tsed_0.05", Tsed_up="Tsed_0.02", Tsed_down="Tsed_0.08", 
+                              Obsdat=Obsdat_ZK1.1, Date.from="2021-11-01", Date.to="2022-11-01",
+                              data.type="l", title="depth=0.05m", right.ylim_water=c(0, 100), right.ylim_radiation=c(0, 100), cex.text=1.7, cex.legend=0.8, cex.main=1,
+                              offset = 0, ...) {
+  
+  # Define full time range (xlim) as one year
+  xlim <- as.POSIXct(c(Date.from, Date.to), origin="1970-01-01")
+  # the data (Sediment Temperature on the left Y-axis)
+  idat <- which(Obsdat$Time >= Date.from & Obsdat$Time <= Date.to)
+  plot(Obsdat$Time[idat], Obsdat$Temperature[idat], 
+       type=data.type, lwd=2, col="red", xlab="", ylab="Sediment temperature (°C)", 
+       main=title, cex.main=cex.main, xlim=xlim, las=1, ...)
+  
+  # the model output
+  origin <- "2018-08-07 00:00:00"
+  DT.times <- as.POSIXct(out[,"time"], origin = origin)
+  # Apply time offset (in hours): when offset = 2, subtract 2 hours from model time
+  DT.times <- DT.times - as.difftime(offset, units = "hours")
+  
+  ii <- which(DT.times >= Date.from & DT.times <= Date.to)
+  lines(DT.times[ii], out[ii, Tsed])
+  xx <- c(DT.times[ii], rev(DT.times[ii]))
+  yy <- c(out[ii, Tsed_up], rev(out[ii, Tsed_down]))
+  polygon(xx, yy, col = alpha.col("lightgrey", alpha=1), border = NA)
+  
+  # Legend for temperature data and model
+  legend("topleft", legend=c("Data", "Model"), col=c("red", "black"), lty=1, lwd=2:1, cex=cex.legend)
+  
+  ## Solar Radiation as a polygon (scaled by dividing by scale.factor)
+  par(new=TRUE)
+  plot(DT.times[ii], out[ii, "Solarradiation"], type="n", axes=FALSE, xlab="", ylab="", ylim=right.ylim_radiation, xlim=xlim)
+  polygon(c(DT.times[ii[1]], DT.times[ii], DT.times[ii[length(ii)]], DT.times[ii[1]]),
+          c(0, out[ii, "Solarradiation"], 0, 0), border=NA, col=alpha.col("yellow", alpha=1))
+  
+  # Add the first y-axis on the right
+  axis(4, col = "#DAA520", col.axis = "#DAA520", las = 1)  # las = 1 for horizontal tick labels
+  mtext("Solar radiation (W/m²)", side = 4, line = 3, col = "#DAA520", cex=cex.text)  # Add label for the first y-axis
+  
+  ## Water Height as a polygon (use a different color)
+  par(new=TRUE)
+  plot(DT.times[ii], out[ii, "Waterheight"], type="n", axes=FALSE, xlab="", ylab="", ylim=right.ylim_water, xlim=xlim)
+  polygon(c(DT.times[ii[1]], DT.times[ii], DT.times[ii[length(ii)]], DT.times[ii[1]]),
+          c(0, out[ii, "Waterheight"], 0, 0), border=NA, col=alpha.col("blue", alpha=1))
+  
+  # Add the secondary y-axis on the right
+  axis(4, col = "blue", col.axis = "blue", line = 5, las=1)  # Adjust line for separation
+  mtext("Water height (m)", side = 4, line = 7, col = "blue", cex=cex.text)  # Add label for secondary y-axis
+
+  ## Re-plot the sediment temperature data (as it's been overwritten by the other plots)
+  par(new=TRUE)
+  plot(Obsdat$Time[idat], Obsdat$Temperature[idat], 
+       type=data.type, lwd=2, col="red", xlab="", ylab="Sediment temperature (°C)", 
+       main=title, cex.main=cex.main, xlim=xlim, las=1, ...)
+  lines(DT.times[ii], out[ii, Tsed], lwd=2)
+}
+
+
+```
+
+
+#### Station A: Plot model-data fit
+
+```{r,fig.width=10, fig.height=5}
+par(mfrow=c(1,1), mar=c(4,5,4,9))
+#3cm
+ModelBandDataPlot(Tout.wad_A_A, Tsed="Tsed_0.03", "Tsed_0.03", "Tsed_0.03", Obsdat_A_3cm, "2018-08-08", "2018-08-20", ylim=c(10, 30), title = "A_3cm", right.ylim_water =c(0, 5), right.ylim_radiation =c(0, 1000),cex.legend=0.8,cex.text = 1,cex.main=1, offset = 2)
+#15cm
+ModelBandDataPlot(Tout.wad_A_A, Tsed="Tsed_0.15", "Tsed_0.15", "Tsed_0.15", Obsdat_A_15cm, "2018-08-08", "2018-08-20", ylim=c(10, 30), title = "A_15cm", right.ylim_water =c(0, 5), right.ylim_radiation =c(0, 1000),cex.legend=0.8,cex.text = 1,cex.main=1, offset = 2)
+```
+
+# 4. Scneario analysis
+
+## 4.1 Use 14d time series
+### 4.1.1. Generate shifted water height forcings
+```{r}
+
+# --- Define time shifts ---
+shift_hours <- seq(-6, 6, by = 3)
+shift_seconds <- shift_hours * 3600
+
+# --- Convert to data frame ---
+df_height <- as.data.frame(fHeight_A_Den.wad)
+colnames(df_height) <- c("Second", "H.m")
+
+# --- Model time range ---
+t_start <- 7200
+t_end   <- 1208700
+
+# --- Helper function to shift safely within model time window ---
+shift_and_trim <- function(df, shift_sec) {
+  shifted <- df
+  shifted$Second <- shifted$Second + shift_sec
+  
+  # Trim to ensure coverage of model time window
+  shifted <- shifted[shifted$Second >= t_start & shifted$Second <= t_end, ]
+  
+  # If the shifted series doesn’t start early enough, pad with first value
+  if (min(shifted$Second) > t_start) {
+    shifted <- rbind(
+      data.frame(Second = t_start, H.m = shifted$H.m[1]),
+      shifted
+    )
+  }
+  
+  # If it doesn’t end late enough, pad with last value
+  if (max(shifted$Second) < t_end) {
+    shifted <- rbind(
+      shifted,
+      data.frame(Second = t_end, H.m = tail(shifted$H.m, 1))
+    )
+  }
+  
+  # Convert to matrix for model
+  to_forcing_matrix(shifted)
+}
+
+# --- Create shifted forcing list safely ---
+fHeight_shifted_list <- lapply(shift_seconds, function(s) shift_and_trim(df_height, s))
+names(fHeight_shifted_list) <- paste0("shift_", shift_hours, "h")
+
+### --- 4. Plot comparison of sediment temperatures ---
+cols <- 1:length(names(fHeight_shifted_list))
+
+
+
+plot(NULL, xlim=range(fHeight_shifted_list[[1]][,1]), ylim = range(fHeight_shifted_list[[1]][,2]),
+     xlab = "Time (hours)", ylab = "Water height",
+     main = "tidal phase shift ts")
+
+for (i in 1:length(names(fHeight_shifted_list))){
+  out <- fHeight_shifted_list[[i]]
+  lines(out[, 1], out[, 2], col = cols[i], lwd = 2)
+}
+
+legend("topright", legend = names(fHeight_shifted_list), col = cols, lwd = 2, title = "Shift (hours)")
+
+
+```
+
+
+### 4.1.2. Run the model for each shifted forcing
+```{r}
+# --- Define a function to run one model scenario ---
+Tout_shifted <- lapply(fHeight_shifted_list, function(fH) {
+  TempSED_run1D(
+    z_max = length.z, dz_1 = dz.1,
+    T_ini = 20,
+    Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z),
+    times = times, porosity = porfun,
+    dependency_on_T = dependencyT,
+    parms = list(
+      cp_solid = cpSolid,
+      tc_solid = tcSolid,
+      em_air = emAir,
+      dalton = dalton,
+      stanton = stanton,
+      albedo_sediment = albedoSed,
+      kd_water = kdWater,
+      albedo_water = albedoWater
+    ),
+    f_Pressure = fPair_WaS.wad,
+    f_Airtemperature = fTair_WaS.wad,
+    f_Waterheight = fH,
+    f_Watertemperature = fTwater_A.wad, # Onshore station A
+    f_Qrel = fHumidity_WaS.wad,
+    f_Solarradiation = fRad_WaS.wad,
+    f_Windspeed = fWind_WaS.wad,
+    f_Cloudiness = fCloud_WaS.wad,
+    sedpos = c(0, 0.03, 0.15)
+  )
+})
+
+
+```
+
+### 4.1.3 Plot all scenarios together (base R)
+
+```{r}
+# 3 cm
+cols <- c("blue", "green", "black", "orange", "red")
+
+# png(paste0(wd,"/Graphs/3cm_TideShift.png"),width=600, height =450, units = "px")
+plot(NULL, NULL,
+     xlim = range(Tout_shifted[[1]][,"time"])/3600,
+     ylim = c(10, 35),
+     xlab = "Time (hours since start)",
+     ylab = "Sediment temperature (°C)",
+     main = "Sediment temperature response to tidal phase shift (3 cm)")
+
+for (i in seq_along(Tout_shifted)) {
+  lines(Tout_shifted[[i]][,"time"]/3600,
+        Tout_shifted[[i]][,"Tsed_0.03"],
+        col = cols[i], lwd = 2)
+}
+
+legend("topright", legend = paste(shift_hours, "h"),
+       col = cols, lwd = 2, title = "Water height shift")
+# dev.off()
+### 15 cm
+
+# png(paste0(wd,"/Graphs/15cm_TideShift.png"),width=600, height =450, units = "px")
+cols <- c("blue", "green", "black", "orange", "red")
+
+plot(NULL, NULL,
+     xlim = range(Tout_shifted[[1]][,"time"])/3600,
+     ylim = c(15, 27),
+     xlab = "Time (hours since start)",
+     ylab = "Sediment temperature (°C)",
+     main = "Sediment temperature response to tidal phase shift (15 cm)")
+
+for (i in seq_along(Tout_shifted)) {
+  lines(Tout_shifted[[i]][,"time"]/3600,
+        Tout_shifted[[i]][,"Tsed_0.15"],
+        col = cols[i], lwd = 2)
+}
+
+legend("topright", legend = paste(shift_hours, "h"),
+       col = cols, lwd = 2, title = "Water height shift")
+# dev.off()
+```
+
+
+
+## 4.2. Focus on mean diurnal cycle
+
+### 4.2.1 Filter all forcings
+```{r}
+
+# --- Time limits in seconds ---
+t_start <- 7200
+t_end   <- 1208700
+
+# --- Helper function to filter forcing data ---
+filter_forcing <- function(df) {
+  df[df[,1] >= t_start & df[,1] <= t_end, , drop = FALSE]
+}
+
+# --- Apply to each forcing ---
+fWind_WaS.wad_filt      <- filter_forcing(fWind_WaS.wad)%>%as.data.frame();names(fWind_WaS.wad_filt)[1] = "Second"
+fRad_WaS.wad_filt       <- filter_forcing(fRad_WaS.wad)%>%as.data.frame();names(fRad_WaS.wad_filt)[1] = "Second"
+fTair_WaS.wad_filt      <- filter_forcing(fTair_WaS.wad)%>%as.data.frame();names(fTair_WaS.wad_filt)[1] = "Second"
+fPair_WaS.wad_filt      <- filter_forcing(fPair_WaS.wad)%>%as.data.frame();names(fPair_WaS.wad_filt)[1] = "Second"
+fHumidity_WaS.wad_filt  <- filter_forcing(fHumidity_WaS.wad)%>%as.data.frame();names(fHumidity_WaS.wad_filt)[1] = "Second"
+fCloud_WaS.wad_filt     <- filter_forcing(fCloud_WaS.wad)%>%as.data.frame();names(fCloud_WaS.wad_filt)[1] = "Second"
+fHeight_A_Den.wad_filt  <- filter_forcing(fHeight_A_Den.wad)%>%as.data.frame();names(fHeight_A_Den.wad_filt)[1] = "Second"
+fTwater_A.wad_filt <- filter_forcing(fTwater_A.wad)%>%as.data.frame();names(fTwater_A.wad_filt)[1] = "Second"
+
+```
+
+### 4.2.2 compute the diurnal mean for each filtered dataset
+
+```{r}
+
+
+library(dplyr)
+library(lubridate)
+
+start_time <- as.POSIXct("2018-08-08 00:00:00", tz = "UTC")
+
+forcing_to_diurnal <- function(df) {
+  df %>%
+    mutate(
+      datetime = start_time + Second,
+      hour = hour(datetime)
+    ) %>%
+    group_by(hour) %>%
+    summarise(across(-c(Second, datetime), mean, na.rm = TRUE)) %>%
+    mutate(Second = hour * 3600) %>%
+    select(Second, everything())
+}
+
+fWind_diurnal     <- forcing_to_diurnal(fWind_WaS.wad_filt)
+fRad_diurnal      <- forcing_to_diurnal(fRad_WaS.wad_filt)
+fTair_diurnal     <- forcing_to_diurnal(fTair_WaS.wad_filt)
+fPair_diurnal     <- forcing_to_diurnal(fPair_WaS.wad_filt)
+fHumidity_diurnal <- forcing_to_diurnal(fHumidity_WaS.wad_filt)
+fCloud_diurnal    <- forcing_to_diurnal(fCloud_WaS.wad_filt)
+fHeight_diurnal   <- forcing_to_diurnal(fHeight_A_Den.wad_filt)
+fTwater_A_diurnal   <- forcing_to_diurnal(fTwater_A.wad_filt)
+
+### Water height lowest point coincide with the highest water temperature
+
+
+par(mar=c(5,5,5,5))
+plot(fHeight_diurnal$hour, fHeight_diurnal$V2, 
+     yaxt="n", xlab = "hour", ylab = "water level")
+axis(2)
+legend("topleft",c("water level", "water height (m)"),pch =c(1,NA),lty=c(NA,1),col=1:2)
+
+par(new=T)
+plot(fTwater_A_diurnal$hour, fTwater_A_diurnal$V2, t="l", col=2, ylab="", xlab="", yaxt="n")
+axis(4)
+lines(fTair_diurnal$hour, fTair_diurnal$V2, col=3)
+mtext("water/sediment interface temperature", side =4, line = 2)
+
+```
+
+
+### 4.2.3 Cyclic shift: 
+
+```{r}
+
+# Helper function
+# Shift forcing time series forward by N hours (cyclically)
+shift_forcing_hours <- function(df, hours_shift, time_step = 3600) {
+  n_shift <- hours_shift * 3600 / time_step  # how many rows to shift
+  n <- nrow(df)
+  
+  # Circular (wrap-around) shift
+  shifted_values <- c(df[(n_shift + 1):n, 3][[1]], df[1:n_shift,3][[1]])
+  
+  # Reuse same time column
+  data.frame(Second = df[, 1], hour = df[,2], V2 = df[,3], shifted = shifted_values)
+}
+
+#### Example
+# Assume fHeight_diurnal and fTwater_diurnal are your averaged diurnal forcings
+fHeight_shift3 <- shift_forcing_hours(fHeight_diurnal, 3)
+fHeight_shift6 <- shift_forcing_hours(fHeight_diurnal, 6)
+
+fTwater_shift3 <- shift_forcing_hours(fTwater_A_diurnal, 3)
+fTwater_shift6 <- shift_forcing_hours(fTwater_A_diurnal, 6)
+
+#### Quick visual check
+plot(fHeight_diurnal$Second/3600, fHeight_diurnal$V2, type="l", lwd=2, ylim=range(fHeight_diurnal$V2),
+     xlab="Hour of Day", ylab="Water Height (m)", main="Phase Shift of Water Height")
+lines(fHeight_shift3$Second/3600, fHeight_shift3$shifted, col="blue", lwd=2, lty=2)
+lines(fHeight_shift6$Second/3600, fHeight_shift6$shifted, col="red", lwd=2, lty=3)
+legend("topright", legend=c("Original", "+3h shift", "+6h shift"),
+       col=c("black", "blue", "red"), lty=1:3, lwd=2)
+
+```
+
+### 4.2.3.1 modified tide cycle (to add exposure time)
+```{r}
+
+
+#### Example
+# Assume fHeight_diurnal and fTwater_diurnal are your averaged diurnal forcings
+fHeight_diurnal$V2[fHeight_diurnal$V2<0.3] = 0
+fHeight_shift3 <- shift_forcing_hours(fHeight_diurnal, 3)
+fHeight_shift6 <- shift_forcing_hours(fHeight_diurnal, 6)
+
+fTwater_shift3 <- shift_forcing_hours(fTwater_A_diurnal, 3)
+fTwater_shift6 <- shift_forcing_hours(fTwater_A_diurnal, 6)
+
+#### Quick visual check
+plot(fHeight_diurnal$Second/3600, fHeight_diurnal$V2, type="l", lwd=2, ylim=range(fHeight_diurnal$V2),
+     xlab="Hour of Day", ylab="Water Height (m)", main="Phase Shift of Water Height")
+lines(fHeight_shift3$Second/3600, fHeight_shift3$shifted, col="blue", lwd=2, lty=2)
+lines(fHeight_shift6$Second/3600, fHeight_shift6$shifted, col="red", lwd=2, lty=3)
+legend("topright", legend=c("Original", "+3h shift", "+6h shift"),
+       col=c("black", "blue", "red"), lty=1:3, lwd=2)
+```
+
+### 4.2.4. run Scenarios
+
+##### 4.2.4.1 shifted tide and water temperrature
+```{r}
+
+### --- 1. Helper: circular shift of forcing by hours ---
+shift_forcing_hours <- function(df, hours_shift, time_step = 3600) {
+  n_shift <- hours_shift * 3600 / time_step
+  n <- nrow(df)
+  # Circular (wrap-around) shift
+  shifted_values <- c(df[(n_shift + 1):n, 3][[1]], df[1:n_shift,3][[1]])
+  
+    # Reuse same time column
+  cbind(Second = df[, 1], shifted = shifted_values)
+}
+
+### --- 2. Create shifted versions for both forcings ---
+# assume fHeight_A_Den.wad and fTwater_A.wad are already filtered and hourly
+
+fHeight_shifted_list <- list(
+  "0h"  = fHeight_diurnal[,c(1,3)]%>%as.matrix(),
+  "+3h" = shift_forcing_hours(fHeight_diurnal, 3),
+  "+6h" = shift_forcing_hours(fHeight_diurnal, 6)
+)
+
+fTwater_shifted_list <- list(
+  "0h"  = fTwater_A_diurnal[,c(1,3)]%>%as.matrix(),
+  "+3h" = shift_forcing_hours(fTwater_A_diurnal, 3),
+  "+6h" = shift_forcing_hours(fTwater_A_diurnal, 6)
+)
+
+### --- 3. Run model for each shifted combination ---
+Tout_shifted <- list()
+
+times_diurnal <- fPair_diurnal$Second
+for (i in names(fHeight_shifted_list)) {
+  Tout_shifted[[i]] <- TempSED_run1D(
+    z_max = length.z, dz_1 = dz.1,
+    T_ini = 20,
+    Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z),
+    times = times_diurnal, porosity = porfun,
+    dependency_on_T = dependencyT,
+    parms = list(
+      cp_solid = cpSolid,
+      tc_solid = tcSolid,
+      em_air = emAir,
+      dalton = dalton,
+      stanton = stanton,
+      albedo_sediment = albedoSed,
+      kd_water = kdWater,
+      albedo_water = albedoWater
+    ),
+    f_Pressure = as.matrix(fPair_diurnal[,c(1,3)]),
+    f_Airtemperature = as.matrix(fTair_diurnal[,c(1,3)]),
+    f_Waterheight = as.matrix(fHeight_shifted_list[[i]]),
+    f_Watertemperature = as.matrix(fTwater_shifted_list[[i]]),
+    # f_Watertemperature = as.matrix(fTwater_A_diurnal[,c(1,3)]),
+    f_Qrel = as.matrix(fHumidity_diurnal[,c(1,3)]),
+    f_Solarradiation = as.matrix(fRad_diurnal[,c(1,3)]),
+    f_Windspeed = as.matrix(fWind_diurnal[,c(1,3)]),
+    f_Cloudiness = as.matrix(fCloud_diurnal[,c(1,3)]),
+    sedpos = c(0, 0.03, 0.15)
+  )
+  message("✅ Finished run for shift: ", i)
+}
+
+
+### --- 4. Plot comparison of sediment temperatures ---
+cols <- c("black", "blue", "red")
+plot(NULL, xlim = range(times_diurnal)/3600, ylim = c(10, 30),
+     xlab = "Time (hours)", ylab = "Sediment temperature (°C)",
+     main = "Effect of tidal phase shift on sediment temperature at 3 cm")
+
+for (i in seq_along(Tout_shifted)) {
+  out <- Tout_shifted[[i]]
+  lines(out[, "time"]/3600, out[, "Tsed_0.03"], col = cols[i], lwd = 2)
+}
+
+legend("topright", legend = names(Tout_shifted), col = cols, lwd = 2, title = "Shift (hours)")
+
+### At 15 cm
+cols <- c("black", "blue", "red")
+plot(NULL, xlim = range(times_diurnal)/3600, ylim = c(10, 30),
+     xlab = "Time (hours)", ylab = "Sediment temperature (°C)",
+     main = "Effect of tidal phase shift on sediment temperature at 15cm")
+
+for (i in seq_along(Tout_shifted)) {
+  out <- Tout_shifted[[i]]
+  lines(out[, "time"]/3600, out[, "Tsed_0.15"], col = cols[i], lwd = 2)
+}
+
+legend("topright", legend = names(Tout_shifted), col = cols, lwd = 2, title = "Shift (hours)")
+
+```
+
+
+#### 4.2. Increased water temperature
+
+```{r}
+### --- 1. Helper: circular shift of forcing by hours ---
+shift_forcing_hours <- function(df, hours_shift, time_step = 3600) {
+  n_shift <- hours_shift * 3600 / time_step
+  n <- nrow(df)
+  # Circular (wrap-around) shift
+  shifted_values <- c(df[(n_shift + 1):n, 3][[1]], df[1:n_shift,3][[1]])
+  
+    # Reuse same time column
+  cbind(Second = df[, 1], shifted = shifted_values)
+}
+
+### --- 2. Create shifted versions for both forcings ---
+# assume fHeight_A_Den.wad and fTwater_A.wad are already filtered and hourly
+
+fHeight_shifted_list <- list(
+  "0h"  = fHeight_diurnal[,c(1,3)]%>%as.matrix(),
+  "+3h" = shift_forcing_hours(fHeight_diurnal, 3),
+  "+6h" = shift_forcing_hours(fHeight_diurnal, 6)
+)
+
+### --- 1. Helper: circular shift of forcing by hours ---
+change_T <- function(df, dT, time_step = 3600) {
+
+  changed_values <- df[,3]+dT
+  
+  # Reuse same time column
+  cbind(Second = df[, 1], changed = changed_values)
+}
+
+fTwater_changed_list <- list(
+  "0C"  = fTwater_A_diurnal[,c(1,3)]%>%as.matrix(),
+  "+2C" = change_T(fTwater_A_diurnal, 2),
+  "+4C" = change_T(fTwater_A_diurnal, 4)
+)
+
+
+Tout_shifted <- list()
+
+times_diurnal <- fPair_diurnal$Second
+for (i in names(fTwater_changed_list)) {
+  Tout_shifted[[i]] <- TempSED_run1D(
+    z_max = length.z, dz_1 = dz.1,
+    T_ini = 20,
+    Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z),
+    times = times_diurnal, porosity = porfun,
+    dependency_on_T = dependencyT,
+    parms = list(
+      cp_solid = cpSolid,
+      tc_solid = tcSolid,
+      em_air = emAir,
+      dalton = dalton,
+      stanton = stanton,
+      albedo_sediment = albedoSed,
+      kd_water = kdWater,
+      albedo_water = albedoWater
+    ),
+    f_Pressure = as.matrix(fPair_diurnal[,c(1,3)]),
+    # f_Airtemperature = as.matrix(fTair_diurnal[,c(1,3)]),
+    # f_Waterheight = as.matrix(fHeight_shifted_list[[i]]),
+    # f_Watertemperature = as.matrix(fTwater_shifted_list[[i]]),
+    f_Airtemperature = as.matrix(fTair_diurnal[,c(1,3)]),
+    f_Waterheight = as.matrix(fHeight_shifted_list[[1]]),
+    f_Watertemperature = as.matrix(fTwater_changed_list[[i]]),
+    f_Qrel = as.matrix(fHumidity_diurnal[,c(1,3)]),
+    f_Solarradiation = as.matrix(fRad_diurnal[,c(1,3)]),
+    f_Windspeed = as.matrix(fWind_diurnal[,c(1,3)]),
+    f_Cloudiness = as.matrix(fCloud_diurnal[,c(1,3)]),
+    sedpos = c(0, 0.03, 0.15)
+  )
+  message("✅ Finished run for shift: ", i)
+}
+
+### --- 4. Plot comparison of sediment temperatures ---
+cols <- c("black", "blue", "red")
+plot(NULL, xlim = range(times_diurnal)/3600, ylim = c(10, 30),
+     xlab = "Time (hours)", ylab = "Sediment temperature (°C)",
+     main = "Effect of interface water temperature on sediment temperature at 3 cm")
+
+for (i in seq_along(Tout_shifted)) {
+  out <- Tout_shifted[[i]]
+  lines(out[, "time"]/3600, out[, "Tsed_0.03"], col = cols[i], lwd = 2)
+}
+
+legend("topright", legend = names(Tout_shifted), col = cols, lwd = 2, title = "Shift (hours)")
+
+
+### At 15 cm
+cols <- c("black", "blue", "red")
+plot(NULL, xlim = range(times_diurnal)/3600, ylim = c(10, 30),
+     xlab = "Time (hours)", ylab = "Sediment temperature (°C)",
+     main = "Effect of interface water temperature on sediment temperature at 15cm")
+
+for (i in seq_along(Tout_shifted)) {
+  out <- Tout_shifted[[i]]
+  lines(out[, "time"]/3600, out[, "Tsed_0.15"], col = cols[i], lwd = 2)
+}
+
+legend("topright", legend = names(Tout_shifted), col = cols, lwd = 2, title = "Shift (hours)")
+
+```
+
+
+
+##### 4.2.4.3 Increased air temperature
+```{r}
+
+### --- 1. Helper: circular shift of forcing by hours ---
+change_T <- function(df, dT, time_step = 3600) {
+
+  changed_values <- df[,3]+dT
+  
+  # Reuse same time column
+  cbind(Second = df[, 1], changed = changed_values)
+}
+
+### --- 2. Create shifted versions for both forcings ---
+# assume fHeight_A_Den.wad and fTwater_A.wad are already filtered and hourly
+
+fTair_changed_list <- list(
+  "0C"  = fTair_diurnal[,c(1,3)]%>%as.matrix(),
+  "+2C" = change_T(fTair_diurnal, 2),
+  "+4C" = change_T(fTair_diurnal, 4)
+)
+
+
+### --- 3. Run model for each shifted combination ---
+Tout_shifted <- list()
+
+times_diurnal <- fPair_diurnal$Second
+for (i in names(fTair_changed_list)) {
+  Tout_shifted[[i]] <- TempSED_run1D(
+    z_max = length.z, dz_1 = dz.1,
+    T_ini = 20,
+    Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z),
+    times = times_diurnal, porosity = porfun,
+    dependency_on_T = dependencyT,
+    parms = list(
+      cp_solid = cpSolid,
+      tc_solid = tcSolid,
+      em_air = emAir,
+      dalton = dalton,
+      stanton = stanton,
+      albedo_sediment = albedoSed,
+      kd_water = kdWater,
+      albedo_water = albedoWater
+    ),
+    f_Pressure = as.matrix(fPair_diurnal[,c(1,3)]),
+    # f_Airtemperature = as.matrix(fTair_diurnal[,c(1,3)]),
+    # f_Waterheight = as.matrix(fHeight_shifted_list[[i]]),
+    # f_Watertemperature = as.matrix(fTwater_shifted_list[[i]]),
+    f_Airtemperature = as.matrix(fTair_changed_list[[i]]),
+    f_Waterheight = as.matrix(fHeight_shifted_list[[1]]),
+    f_Watertemperature = as.matrix(fTwater_A_diurnal[,c(1,3)]),
+    f_Qrel = as.matrix(fHumidity_diurnal[,c(1,3)]),
+    f_Solarradiation = as.matrix(fRad_diurnal[,c(1,3)]),
+    f_Windspeed = as.matrix(fWind_diurnal[,c(1,3)]),
+    f_Cloudiness = as.matrix(fCloud_diurnal[,c(1,3)]),
+    sedpos = c(0, 0.03, 0.15)
+  )
+  message("✅ Finished run for shift: ", i)
+}
+
+### --- 4. Plot comparison of sediment temperatures ---
+cols <- c("black", "blue", "red")
+plot(NULL, xlim = range(times_diurnal)/3600, ylim = c(10, 30),
+     xlab = "Time (hours)", ylab = "Sediment temperature (°C)",
+     main = "Effect of air temperature increase on sediment temperature at 3cm")
+
+for (i in seq_along(Tout_shifted)) {
+  out <- Tout_shifted[[i]]
+  lines(out[, "time"]/3600, out[, "Tsed_0.03"], col = cols[i], lwd = 2)
+}
+
+legend("topright", legend = names(Tout_shifted), col = cols, lwd = 2, title = "Shift (hours)")
+
+### At 15 cm
+cols <- c("black", "blue", "red")
+plot(NULL, xlim = range(times_diurnal)/3600, ylim = c(10, 30),
+     xlab = "Time (hours)", ylab = "Sediment temperature (°C)",
+     main = "Effect of air temperature increase on sediment temperature at 15cm")
+
+for (i in seq_along(Tout_shifted)) {
+  out <- Tout_shifted[[i]]
+  lines(out[, "time"]/3600, out[, "Tsed_0.15"], col = cols[i], lwd = 2)
+}
+
+legend("topright", legend = names(Tout_shifted), col = cols, lwd = 2, title = "Shift (hours)")
+
+
+
+```
+No differences when changing air temperature?? -> Reply: because the averaged water height is always greater than zero, meaning it is always submerged. So water temperature is influencing sediment temperature, but not air temperature.
+
+# 5. Visualization
+## 5.1  a function to plot daily average temperature profiles
+### 4.1.2. Run the model for each shifted forcing
+```{r}
+Plot_DailyAverageT <- function(Data=Tout.wad_A_A, title1="", title2=""){
+#par(oma=c(2,0,0,0), mar=c(4,4,4,2), cex=1.5)
+Temp <- subset(Data, which="Temperature")
+times <- Data[,1]
+DT.times <- as.POSIXct(times, origin=as.POSIXct("2018-08-07 00:00:00", tz = "CET"))
+DT.d <- as.Date(DT.times, tz = "CET")
+
+Jul  <- julian(DT.d)
+Tday <- NULL
+for (i in 1:ncol(Temp)){
+  Tday <- cbind(Tday, tapply(Temp[,i], INDEX=Jul, FUN=mean))
+}
+#Tday is a dataframe whose columns are 100 layers and rows are 366 days
+DT.day <- unique(DT.d)
+#DT.day is date from 2021-10-31 to 2022-10-31
+Grid <- attributes(Data)$grid
+
+par(mfrow=c(1,2))
+par(mar = c(2, 1, 3, 3))
+#par(mar = c(3, 4, 3, 5))
+image2D(
+  x = DT.day,
+  y = Grid$x.mid,
+  z = Tday,
+  ylim = c(10, 0),
+  las = 1,
+  xaxt = "n",
+  yaxt = "n",
+  xlab = "Date",
+  ylab = "Depth (cm)",
+  main = title1,
+  clab = "°C",
+  contour = list(levels = c(15, 20, 25, 30), labcex = 1.2),
+  zlim = c(15, 30),
+  colkey = list(dist = 0.08)  # default is 0, increase to move right
+)
+
+
+axis(1, at = c(DT.day[1], DT.day[length(DT.day)/3], DT.day[length(DT.day)*2/3], DT.day[length(DT.day)]), 
+labels = c(DT.day[1], DT.day[length(DT.day)/3], DT.day[length(DT.day)*2/3], DT.day[length(DT.day)]), las = 1)
+axis(2, at=seq(10,0, by=-2), labels = TRUE)
+
+
+#axis.POSIXct(1,at = seq(from = DT.day[1],to = DT.day[length(DT.day)],by = "4 months"), format = "%b", las=1)  
+
+par(mar = c(4, 1, 2, 4))  # Add space on right side for color key
+matplot(y = Grid$x.mid, x = t(Tday), type = "l", main = title2, las = 1,
+        col = jet.col(367), ylim = c(10, 0), xlim = c(0, 25),
+        xaxs = "i", lty = 1, yaxt = "n", xlab = "Temperature (°C)", yaxs = "i")
+
+axis(2, at = seq(10, 0, by = -2), labels = FALSE)
+
+colkey(col = jet.col(367),
+       clim = c(0, 365),
+       clab = c("", "Day"),
+       add = TRUE,
+       dist = 0.05,         # Positive distance → right of plot
+       length = 0.5,
+       cex.clab = 0.7,
+       at = c(0, 100, 200, 300))
+}
+Plot_DailyAverageT(Data=Tout.wad_A_A, title1="Daily average sediment temperature profile at Station A", title2="Sediment temperature profiles at Station A")
+Plot_DailyAverageT(Data=Tout.wad_B_B, title1="Daily average sediment temperature profile at Station B", title2="Sediment temperature profiles at Station B")
+
+```
+
+# 6. DEB temperature tolerance evaluation
+## 6.1. DEB model parameterization for estuarine bivalves
+```{r}
+# EXPLORING IMPACTS TEMPERATURES ON ESTUARINE BIVALVES
+# STABLE VERSUS FLUCTUATING SST
+# AVERAGE OF 22 DEGREE CELSIUS
+# RANGE 20-24 DEGREES CELSIUS
+
+## STEP 1: DATA IMPORT & SELECTION
+setwd() # set your working directory 
+# "..\\2022 Ms0 Philippart ea Heatwave 2018\\r script"
+
+# import species' count (PC) file
+BIV <- read.table(file = "cp_2022.08.27_MOK2018.txt", header = TRUE, dec = ",")
+
+# check if import & selection was performed correctly
+names(BIV)
+str(BIV)
+summary(BIV)
+
+# DEB parameter values & equations
+
+# Sources for DEB parameter values:
+# BK: Bas Kooijman website DEB (2013) "Species.xl" downloaded on 30/8/2013
+# BS: Brecht Stechele et al. (2022) Conserv Physiol 10(1): coac034; doi:10.1093/conphys/coac034.
+# CM: Cristian Monaco et al. (2019) Mar Biol 166, 14
+# FM: Francesc Maynou et al. (2021) Sci Tot Env 777, 1460668 
+# HV: Henk van der Veer et al. (2006) Journal of Sea Research 56, 107-124
+# TS: Tim Schellekens (2012) IMARES Rapport C088/12
+# TT: Tineke Troost et al (2010) Phil. Trans. R. Soc. B 365, 3567-3577
+
+# TEMPERATURE
+T1     = 293     # reference temperature (293 Kelvin = 20 Celcius)
+
+# Cerastoderma edule (HV)
+TAce   = 5800    # Arrhenius temperature (Kelvin)
+TLce   = 278     # lower boundary of tolerance range (Kelvin)
+THce   = 306     # upper boundary of tolerance range (Kelvin) 
+TALce  = 51154   # Arrhenius temperature for rate of decrease at lower boundary (Kelvin)
+TAHce  = 47126   # Arrhenius temperature for rate of decrease at upper boundary (Kelvin)
+
+# Crasosstrea gigas (HV/BS for THcg)
+TAcg   = 5800    # Arrhenius temperature (Kelvin)
+TLcg   = 281     # lower boundary of tolerance range (Kelvin)
+THcg   = 300     # upper boundary of tolerance range (Kelvin) 
+TALcg  = 75000   # Arrhenius temperature for rate of decrease at lower boundary (Kelvin)
+TAHcg  = 30000   # Arrhenius temperature for rate of decrease at upper boundary (Kelvin)
+
+# Ensis directus (TS) nb: after correction of original table
+TAed   = 6000    # Arrhenius temperature (Kelvin)
+TLed   = 278     # lower boundary of tolerance range (Kelvin)
+THed   = 306     # upper boundary of tolerance range (Kelvin) 
+TALed  = 51154   # Arrhenius temperature for rate of decrease at lower boundary (Kelvin)
+TAHed  = 17500   # Arrhenius temperature for rate of decrease at upper boundary (Kelvin)
+
+# Mya arenaria (HV)
+TAma   = 7051    # Arrhenius temperature (Kelvin)
+TLma   = 278     # lower boundary of tolerance range (Kelvin)
+THma   = 306     # upper boundary of tolerance range (Kelvin) 
+TALma  = 1300000 # Arrhenius temperature for rate of decrease at lower boundary (Kelvin)
+TAHma  = 30117   # Arrhenius temperature for rate of decrease at upper boundary (Kelvin)
+
+# Macoma balthica (HV)
+TAmb   = 5800    # Arrhenius temperature (Kelvin)
+TLmb   = 273     # lower boundary of tolerance range (Kelvin)
+THmb   = 290     # upper boundary of tolerance range (Kelvin) 
+TALmb  = 6700000 # Arrhenius temperature for rate of decrease at lower boundary (Kelvin)
+TAHmb  = 49368   # Arrhenius temperature for rate of decrease at upper boundary (Kelvin)
+
+# Mytilus edulis (HV)
+TAme   = 5800    # Arrhenius temperature (Kelvin)
+TLme   = 275     # lower boundary of tolerance range (Kelvin)
+THme   = 296     # upper boundary of tolerance range (Kelvin) 
+TALme  = 45430   # Arrhenius temperature for rate of decrease at lower boundary (Kelvin)
+TAHme  = 31376   # Arrhenius temperature for rate of decrease at upper boundary (Kelvin)
+
+# Mytilus galloprovincialis (CM)
+TAmg   = 5000    # Arrhenius temperature (Kelvin)
+TLmg   = 275     # lower boundary of tolerance range (Kelvin)
+THmg   = 296     # upper boundary of tolerance range (Kelvin) 
+TALmg  = 45430   # Arrhenius temperature for rate of decrease at lower boundary (Kelvin)
+TAHmg  = 31376   # Arrhenius temperature for rate of decrease at upper boundary (Kelvin)
+
+# Ostrea edulis (BS)
+TAoe   = 5000    # Arrhenius temperature (Kelvin)
+TLoe   = 286     # lower boundary of tolerance range (Kelvin)
+THoe   = 303     # upper boundary of tolerance range (Kelvin) 
+TALoe  = 23000   # Arrhenius temperature for rate of decrease at lower boundary (Kelvin)
+TAHoe  = 55610   # Arrhenius temperature for rate of decrease at upper boundary (Kelvin)
+
+# Ruditapes philippinarum (FM)
+TArp   = 6071    # Arrhenius temperature (Kelvin)
+TLrp   = 290     # lower boundary of tolerance range (Kelvin)
+THrp   = 300     # upper boundary of tolerance range (Kelvin) 
+TALrp  = 30424   # Arrhenius temperature for rate of decrease at lower boundary (Kelvin)
+TAHrp  = 299859  # Arrhenius temperature for rate of decrease at upper boundary (Kelvin)
+
+###########
+## FIGURE 2
+## Relationship between temperature and physiological rates of intertidal estuarine bivalve species
+## Equation from Troost et al (2010) Phil. Trans. R. Soc. B 365, 3567-3577
+
+#A. CALCULATIONS
+TempRange <- seq(from = 273, to = 320, by = 1) # from 0 to 47 degrees Celsius
+TempRange
+
+TR2ce <-  exp(TAce/T1-TAce/TempRange)*(1+exp(TALce/T1-TALce/TLce)+exp(TAHce/THce-TAHce/T1))/(1+exp(TALce/TempRange-TALce/TLce)+exp(TAHce/THce-TAHce/TempRange))
+TR2cg <-  exp(TAcg/T1-TAcg/TempRange)*(1+exp(TALcg/T1-TALcg/TLcg)+exp(TAHcg/THcg-TAHcg/T1))/(1+exp(TALcg/TempRange-TALcg/TLcg)+exp(TAHcg/THcg-TAHcg/TempRange))
+TR2ed <-  exp(TAed/T1-TAed/TempRange)*(1+exp(TALed/T1-TALed/TLed)+exp(TAHed/THed-TAHed/T1))/(1+exp(TALed/TempRange-TALed/TLed)+exp(TAHed/THed-TAHed/TempRange))
+TR2ma <-  exp(TAma/T1-TAma/TempRange)*(1+exp(TALma/T1-TALma/TLma)+exp(TAHma/THma-TAHma/T1))/(1+exp(TALma/TempRange-TALma/TLma)+exp(TAHma/THma-TAHma/TempRange))
+TR2mb <-  exp(TAmb/T1-TAmb/TempRange)*(1+exp(TALmb/T1-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/T1))/(1+exp(TALmb/TempRange-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/TempRange))
+TR2me <-  exp(TAme/T1-TAme/TempRange)*(1+exp(TALme/T1-TALme/TLme)+exp(TAHme/THme-TAHme/T1))/(1+exp(TALme/TempRange-TALme/TLme)+exp(TAHme/THme-TAHme/TempRange))
+TR2mg <-  exp(TAmg/T1-TAmg/TempRange)*(1+exp(TALmg/T1-TALmg/TLmg)+exp(TAHmg/THmg-TAHmg/T1))/(1+exp(TALmg/TempRange-TALmg/TLmg)+exp(TAHmg/THmg-TAHmg/TempRange))
+TR2oe <-  exp(TAoe/T1-TAoe/TempRange)*(1+exp(TALoe/T1-TALoe/TLoe)+exp(TAHoe/THoe-TAHoe/T1))/(1+exp(TALoe/TempRange-TALoe/TLoe)+exp(TAHoe/THoe-TAHoe/TempRange))
+TR2rp <-  exp(TArp/T1-TArp/TempRange)*(1+exp(TALrp/T1-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/T1))/(1+exp(TALrp/TempRange-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/TempRange))
+
+
+# PLOT
+par(mfrow = c(1,1))
+
+plot (y = TR2mb, x = TempRange, type = "p", col = "white", ylim = c(0,4),
+      xlab = "Temperature (K)", ylab = "Relative physiological rate (-)")
+
+lines(TempRange, TR2ce, lty=1, lwd=2, col=2)
+lines(TempRange, TR2cg, lty=1, lwd=2, col=3)
+lines(TempRange, TR2ed, lty=1, lwd=2, col=4)
+lines(TempRange, TR2ma, lty=1, lwd=2, col=5)
+lines(TempRange, TR2mb, lty=1, lwd=2, col=6)
+lines(TempRange, TR2me, lty=1, lwd=2, col=8)
+lines(TempRange, TR2mg, lty=2, lwd=2, col=8)
+lines(TempRange, TR2oe, lty=1, lwd=2, col=7)
+lines(TempRange, TR2rp, lty=1, lwd=2, col=9)
+
+X00 <- c(273,273)
+X10 <- c(283,283)
+X20 <- c(293,293)
+X30 <- c(303,303)
+X40 <- c(313,313)
+Y   <- c(0,4)
+
+Xr  <- c(273,320)
+Yr  <- c(1,1)
+
+lines(X00, Y, lty=7,lwd=1, col="grey") #  0C
+lines(X10, Y, lty=7,lwd=1, col="grey") # 10C
+lines(X20, Y, lty=7,lwd=2, col="grey") # 20C
+lines(X30, Y, lty=7,lwd=1, col="grey") # 30C
+lines(X40, Y, lty=7,lwd=1, col="grey") # 40C
+
+lines(Xr, Yr, lty=7,lwd=2, col="grey") # reference (FR=1 at 20C)
+
+
+legend.txt <- c("C.edule","C.gigas","E.directus","M.arenaria","M.balthica","M.edulis","M.galloprovincialis","O.edulis","R.philippinarum")
+legend ("topright", legend = legend.txt,
+        lty = c(1,1,1,1,1,1,2,1,1),
+        lwd = c(2,2,2,2,2,2,2,2,2),
+        col = c(2,3,4,5,6,8,8,7,9),
+        bty = "o", cex = 0.9)
+
+
+```
+
+##  sediment temperature ts
+```{r}
+
+###########
+## FIGURE 3
+## Development of temperatures on a tidal flat at 2 cm above and at 3 cm and 15 cm below the sediment surface
+## in the Mok bay (Texel, the Netherlands) from 7 to xx 2018 
+
+#B. PLOT
+
+# 1 panel
+par(mfrow = c(1,1))
+str(BIV)
+
+plot (y = BIV$StatA02cmA, x = BIV$DayTime, type = "p", col = "white", ylim = c(15,35),
+      xlab = "Day (August 2018)", ylab = "Temperature (degrees Celsius)")
+
+lines(BIV$DayTime, BIV$StatA02cmA, lty=1, lwd=3, col=2)
+lines(BIV$DayTime, BIV$StatA03cmU, lty=1, lwd=2, col=2)
+lines(BIV$DayTime, BIV$StatA15cmU, lty=1, lwd=1, col=2)
+
+lines(BIV$DayTime, BIV$StatB02cmA, lty=1, lwd=3, col=3)
+lines(BIV$DayTime, BIV$StatB03cmU, lty=1, lwd=2, col=3)
+lines(BIV$DayTime, BIV$StatB15cmU, lty=1, lwd=1, col=3)
+
+lines(BIV$DayTime, BIV$StatD02cmA, lty=1, lwd=3, col=4)
+lines(BIV$DayTime, BIV$StatD03cmU, lty=1, lwd=2, col=4)
+lines(BIV$DayTime, BIV$StatD15cmU, lty=1, lwd=1, col=4)
+
+legend.txt <- c("A+3", "A-2", "A-15", "B+3", "B-2", "B-15","C+3", "C-2", "C-15")
+legend ("topright", legend = legend.txt,
+        col = c(2,2,2,3,3,3,4,4,4),
+        lty = c(1,1,1,1,1,1,1,1,1),
+        lwd = c(3,2,1,3,2,1,3,2,1),
+        bty = "o", cex = 0.9)
+
+# 9 panels
+par(mfrow = c(3,3), mar = c(3,5,2,1))
+plot (StatA02cmA ~ DayTime, type = "l", ylim = c(15,36),data = BIV)
+plot (StatA03cmU ~ DayTime, type = "l", ylim = c(15,36),data = BIV)
+plot (StatA15cmU ~ DayTime, type = "l", ylim = c(15,36),data = BIV)
+
+
+plot (StatB02cmA ~ DayTime, type = "l", ylim = c(15,36),data = BIV)
+plot (StatB03cmU ~ DayTime, type = "l", ylim = c(15,36),data = BIV)
+plot (StatB15cmU ~ DayTime, type = "l", ylim = c(15,36),data = BIV)
+
+plot (StatD02cmA ~ DayTime, type = "l", ylim = c(15,36),data = BIV)
+plot (StatD03cmU ~ DayTime, type = "l", ylim = c(15,36),data = BIV)
+plot (StatD15cmU ~ DayTime, type = "l", ylim = c(15,36),data = BIV)
+
+```
+
+
+```{r}
+###########
+## FIGURE 4
+## Potential physiological rates of intertidal estuarine bivalve species 
+## on a tidal flat at 2 cm above and at 3 cm and 15 cm below the sediment surface
+## in the Mok bay (Texel, the Netherlands) from 7 to 20 August 2018 
+## Equation from Troost et al (2010) Phil. Trans. R. Soc. B 365, 3567-3577
+## Temperature data Mok2018 by Philippart & Dethmers (2018, unpublished)
+
+#A. CALCULATIONS
+
+## EPIBENTHOS (Crassostrea, Mytilus & Ostrea)
+
+#  Station A
+BIV$A02 <- BIV$StatA02cmA+273
+BIV$TRcgA <-  exp(TAcg/T1-TAcg/BIV$A02)*(1+exp(TALcg/T1-TALcg/TLcg)+exp(TAHcg/THcg-TAHcg/T1))/(1+exp(TALcg/BIV$A02-TALcg/TLcg)+exp(TAHcg/THcg-TAHcg/BIV$A02))
+BIV$TRmeA <-  exp(TAme/T1-TAme/BIV$A02)*(1+exp(TALme/T1-TALme/TLme)+exp(TAHme/THme-TAHme/T1))/(1+exp(TALme/BIV$A02-TALme/TLme)+exp(TAHme/THme-TAHme/BIV$A02))
+BIV$TRmgA <-  exp(TAmg/T1-TAmg/BIV$A02)*(1+exp(TALmg/T1-TALmg/TLmg)+exp(TAHmg/THmg-TAHmg/T1))/(1+exp(TALmg/BIV$A02-TALmg/TLmg)+exp(TAHmg/THmg-TAHmg/BIV$A02))
+BIV$TRoeA <-  exp(TAoe/T1-TAoe/BIV$A02)*(1+exp(TALoe/T1-TALoe/TLoe)+exp(TAHoe/THoe-TAHoe/T1))/(1+exp(TALoe/BIV$A02-TALoe/TLoe)+exp(TAHoe/THoe-TAHoe/BIV$A02))
+
+#  Station B
+BIV$B02 <- BIV$StatB02cmA+273
+BIV$TRcgB <-  exp(TAcg/T1-TAcg/BIV$B02)*(1+exp(TALcg/T1-TALcg/TLcg)+exp(TAHcg/THcg-TAHcg/T1))/(1+exp(TALcg/BIV$B02-TALcg/TLcg)+exp(TAHcg/THcg-TAHcg/BIV$B02))
+BIV$TRmeB <-  exp(TAme/T1-TAme/BIV$B02)*(1+exp(TALme/T1-TALme/TLme)+exp(TAHme/THme-TAHme/T1))/(1+exp(TALme/BIV$B02-TALme/TLme)+exp(TAHme/THme-TAHme/BIV$B02))
+BIV$TRmgB <-  exp(TAmg/T1-TAmg/BIV$B02)*(1+exp(TALmg/T1-TALmg/TLmg)+exp(TAHmg/THmg-TAHmg/T1))/(1+exp(TALmg/BIV$B02-TALmg/TLmg)+exp(TAHmg/THmg-TAHmg/BIV$B02))
+BIV$TRoeB <-  exp(TAoe/T1-TAoe/BIV$B02)*(1+exp(TALoe/T1-TALoe/TLoe)+exp(TAHoe/THoe-TAHoe/T1))/(1+exp(TALoe/BIV$B02-TALoe/TLoe)+exp(TAHoe/THoe-TAHoe/BIV$B02))
+
+#  Station C
+BIV$C02 <- BIV$StatD02cmA+273
+BIV$TRcgC <-  exp(TAcg/T1-TAcg/BIV$C02)*(1+exp(TALcg/T1-TALcg/TLcg)+exp(TAHcg/THcg-TAHcg/T1))/(1+exp(TALcg/BIV$C02-TALcg/TLcg)+exp(TAHcg/THcg-TAHcg/BIV$C02))
+BIV$TRmeC <-  exp(TAme/T1-TAme/BIV$C02)*(1+exp(TALme/T1-TALme/TLme)+exp(TAHme/THme-TAHme/T1))/(1+exp(TALme/BIV$C02-TALme/TLme)+exp(TAHme/THme-TAHme/BIV$C02))
+BIV$TRmgC <-  exp(TAmg/T1-TAmg/BIV$C02)*(1+exp(TALmg/T1-TALmg/TLmg)+exp(TAHmg/THmg-TAHmg/T1))/(1+exp(TALmg/BIV$C02-TALmg/TLmg)+exp(TAHmg/THmg-TAHmg/BIV$C02))
+BIV$TRoeC <-  exp(TAoe/T1-TAoe/BIV$C02)*(1+exp(TALoe/T1-TALoe/TLoe)+exp(TAHoe/THoe-TAHoe/T1))/(1+exp(TALoe/BIV$C02-TALoe/TLoe)+exp(TAHoe/THoe-TAHoe/BIV$C02))
+
+# B. PLOTS
+
+# Time series temperature response
+par(mfrow = c(3,4), mar = c(3,5,2,1))
+plot (TRcgA ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRmeA ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRmgA ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRoeA ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+
+plot (TRcgB ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRmeB ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRmgB ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRoeB ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+
+plot (TRcgC ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRmeC ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRmgC ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRoeC ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+
+# TABEL
+names(BIV)
+sapply(BIV[c(17:20,22:25,27:30)], mean)
+sapply(BIV[c(17:20,22:25,27:30)], sd)
+sapply(BIV[c(17:20,22:25,27:30)], min)
+
+
+## SHALLOW-BURIED MACROZOOBENTHOS (short siphons: Cerastoderma, Ensis & Ruditapes)
+
+#  Station A
+BIV$A03   <- BIV$StatA03cmU+273
+BIV$TRceA <-  exp(TAce/T1-TAce/BIV$A03)*(1+exp(TALce/T1-TALce/TLce)+exp(TAHce/THce-TAHce/T1))/(1+exp(TALce/BIV$A03-TALce/TLce)+exp(TAHce/THce-TAHce/BIV$A03))
+BIV$TRedA <-  exp(TAed/T1-TAed/BIV$A03)*(1+exp(TALed/T1-TALed/TLed)+exp(TAHed/THed-TAHed/T1))/(1+exp(TALed/BIV$A03-TALed/TLed)+exp(TAHed/THed-TAHed/BIV$A03))
+BIV$TRrpA <-  exp(TArp/T1-TArp/BIV$A03)*(1+exp(TALrp/T1-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/T1))/(1+exp(TALrp/BIV$A03-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/BIV$A03))
+
+#  Station B
+BIV$B03   <- BIV$StatB03cmU+273
+BIV$TRceB <-  exp(TAce/T1-TAce/BIV$B03)*(1+exp(TALce/T1-TALce/TLce)+exp(TAHce/THce-TAHce/T1))/(1+exp(TALce/BIV$B03-TALce/TLce)+exp(TAHce/THce-TAHce/BIV$B03))
+BIV$TRedB <-  exp(TAed/T1-TAed/BIV$B03)*(1+exp(TALed/T1-TALed/TLed)+exp(TAHed/THed-TAHed/T1))/(1+exp(TALed/BIV$B03-TALed/TLed)+exp(TAHed/THed-TAHed/BIV$B03))
+BIV$TRrpB <-  exp(TArp/T1-TArp/BIV$B03)*(1+exp(TALrp/T1-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/T1))/(1+exp(TALrp/BIV$B03-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/BIV$B03))
+
+#  Station C
+BIV$C03   <- BIV$StatD03cmU+273
+BIV$TRceC <-  exp(TAce/T1-TAce/BIV$C03)*(1+exp(TALce/T1-TALce/TLce)+exp(TAHce/THce-TAHce/T1))/(1+exp(TALce/BIV$C03-TALce/TLce)+exp(TAHce/THce-TAHce/BIV$C03))
+BIV$TRedC <-  exp(TAed/T1-TAed/BIV$C03)*(1+exp(TALed/T1-TALed/TLed)+exp(TAHed/THed-TAHed/T1))/(1+exp(TALed/BIV$C03-TALed/TLed)+exp(TAHed/THed-TAHed/BIV$C03))
+BIV$TRrpC <-  exp(TArp/T1-TArp/BIV$C03)*(1+exp(TALrp/T1-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/T1))/(1+exp(TALrp/BIV$C03-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/BIV$C03))
+
+
+# B. PLOTS
+
+# Time series temperature response
+par(mfrow = c(3,3), mar = c(3,5,2,1))
+plot (TRceA ~ DayTime, type = "l",  ylim = c(0,2), data = BIV) 
+abline(h=1, col=8)
+plot (TRedA ~ DayTime, type = "l",  ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRrpA ~ DayTime, type = "l",  ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+
+plot (TRceB ~ DayTime, type = "l",  ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRedB ~ DayTime, type = "l",  ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRrpB ~ DayTime, type = "l",  ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+
+plot (TRceC ~ DayTime, type = "l",  ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRedC ~ DayTime, type = "l",  ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRrpC ~ DayTime, type = "l",  ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+
+# TABEL
+names(BIV)
+sapply(BIV[c(32:34,36:38,40:42)], mean)
+sapply(BIV[c(32:34,36:38,40:42)], sd)
+sapply(BIV[c(32:34,36:38,40:42)], min)
+
+
+## DEEP-BURIED MACROZOOBENTHOS (long siphons: Mya & Macoma)
+
+#  Station A
+BIV$A15 <- BIV$StatA15cmU+273
+BIV$TRmaA <-  exp(TAma/T1-TAma/BIV$A15)*(1+exp(TALma/T1-TALma/TLma)+exp(TAHma/THma-TAHma/T1))/(1+exp(TALma/BIV$A15-TALma/TLma)+exp(TAHma/THma-TAHma/BIV$A15))
+BIV$TRmbA <-  exp(TAmb/T1-TAmb/BIV$A15)*(1+exp(TALmb/T1-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/T1))/(1+exp(TALmb/BIV$A15-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/BIV$A15))
+
+#  Station B
+BIV$B15 <- BIV$StatB15cmU+273
+BIV$TRmaB <-  exp(TAma/T1-TAma/BIV$B15)*(1+exp(TALma/T1-TALma/TLma)+exp(TAHma/THma-TAHma/T1))/(1+exp(TALma/BIV$B15-TALma/TLma)+exp(TAHma/THma-TAHma/BIV$B15))
+BIV$TRmbB <-  exp(TAmb/T1-TAmb/BIV$B15)*(1+exp(TALmb/T1-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/T1))/(1+exp(TALmb/BIV$B15-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/BIV$B15))
+
+#  Station C
+BIV$C15 <- BIV$StatD15cmU+273
+BIV$TRmaC <-  exp(TAma/T1-TAma/BIV$C15)*(1+exp(TALma/T1-TALma/TLma)+exp(TAHma/THma-TAHma/T1))/(1+exp(TALma/BIV$C15-TALma/TLma)+exp(TAHma/THma-TAHma/BIV$C15))
+BIV$TRmbC <-  exp(TAmb/T1-TAmb/BIV$C15)*(1+exp(TALmb/T1-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/T1))/(1+exp(TALmb/BIV$C15-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/BIV$C15))
+
+# B. PLOTS
+
+# Time series temperature response
+par(mfrow = c(3,2), mar = c(3,5,2,1))
+plot (TRmaA ~ DayTime, type = "l", ylim=c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRmbA ~ DayTime, type = "l", ylim=c(0,2), data = BIV)
+abline(h=1, col=8)
+
+plot (TRmaB ~ DayTime, type = "l", ylim=c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRmbB ~ DayTime, type = "l", ylim=c(0,2), data = BIV)
+abline(h=1, col=8)
+
+plot (TRmaC ~ DayTime, type = "l", ylim=c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRmbC ~ DayTime, type = "l", ylim=c(0,2), data = BIV)
+abline(h=1, col=8)
+
+# TABEL
+names(BIV)
+sapply(BIV[c(44:45,47:48,50:51)], mean, na.rm = TRUE)
+sapply(BIV[c(44:45,47:48,50:51)], sd,   na.rm = TRUE)
+sapply(BIV[c(44:45,47:48,50:51)], min,  na.rm = TRUE)
+
+
+
+
+##########################
+## ADDITIONAL CALCULATIONS
+
+# EXTRA A. ADAPTATIVE BURROWING BEHAVIOUR MACROZOOBENTHOS
+
+# If Cerastoderma,Ensis & Ruditapes go to deeper areas:
+BIV$TRceAd <-  exp(TAce/T1-TAce/BIV$A15)*(1+exp(TALce/T1-TALce/TLce)+exp(TAHce/THce-TAHce/T1))/(1+exp(TALce/BIV$A15-TALce/TLce)+exp(TAHce/THce-TAHce/BIV$A15))
+BIV$TRedAd <-  exp(TAed/T1-TAed/BIV$A15)*(1+exp(TALed/T1-TALed/TLed)+exp(TAHed/THed-TAHed/T1))/(1+exp(TALed/BIV$A15-TALed/TLed)+exp(TAHed/THed-TAHed/BIV$A15))
+BIV$TRrpAd <-  exp(TArp/T1-TArp/BIV$A15)*(1+exp(TALrp/T1-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/T1))/(1+exp(TALrp/BIV$A15-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/BIV$A15))
+
+BIV$TRceBd <-  exp(TAce/T1-TAce/BIV$B15)*(1+exp(TALce/T1-TALce/TLce)+exp(TAHce/THce-TAHce/T1))/(1+exp(TALce/BIV$B15-TALce/TLce)+exp(TAHce/THce-TAHce/BIV$B15))
+BIV$TRedBd <-  exp(TAed/T1-TAed/BIV$B15)*(1+exp(TALed/T1-TALed/TLed)+exp(TAHed/THed-TAHed/T1))/(1+exp(TALed/BIV$B15-TALed/TLed)+exp(TAHed/THed-TAHed/BIV$B15))
+BIV$TRrpBd <-  exp(TArp/T1-TArp/BIV$B15)*(1+exp(TALrp/T1-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/T1))/(1+exp(TALrp/BIV$B15-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/BIV$B15))
+
+BIV$TRceCd <-  exp(TAce/T1-TAce/BIV$C15)*(1+exp(TALce/T1-TALce/TLce)+exp(TAHce/THce-TAHce/T1))/(1+exp(TALce/BIV$C15-TALce/TLce)+exp(TAHce/THce-TAHce/BIV$C15))
+BIV$TRedCd <-  exp(TAed/T1-TAed/BIV$C15)*(1+exp(TALed/T1-TALed/TLed)+exp(TAHed/THed-TAHed/T1))/(1+exp(TALed/BIV$C15-TALed/TLed)+exp(TAHed/THed-TAHed/BIV$C15))
+BIV$TRrpCd <-  exp(TArp/T1-TArp/BIV$C15)*(1+exp(TALrp/T1-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/T1))/(1+exp(TALrp/BIV$C15-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/BIV$C15))
+
+# If Macoma go to more shallow areas:
+BIV$TRmbAs <-  exp(TAmb/T1-TAmb/BIV$A03)*(1+exp(TALmb/T1-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/T1))/(1+exp(TALmb/BIV$A03-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/BIV$A03))
+BIV$TRmbBs <-  exp(TAmb/T1-TAmb/BIV$B03)*(1+exp(TALmb/T1-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/T1))/(1+exp(TALmb/BIV$B03-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/BIV$B03))
+BIV$TRmbCs <-  exp(TAmb/T1-TAmb/BIV$C03)*(1+exp(TALmb/T1-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/T1))/(1+exp(TALmb/BIV$C03-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/BIV$C03))
+
+# TABEL
+names(BIV)
+sapply(BIV[c(52:63)], mean, na.rm = TRUE)
+sapply(BIV[c(52:63)], sd,   na.rm = TRUE)
+sapply(BIV[c(52:63)], min,  na.rm = TRUE)
+
+
+## EXTRA B. COMPARISON Vught & Zimmerman (1974; Fig. 8)
+#     Temperatures at 3 cm depth
+#     2018: 
+max(BIV$A03-273) # 28.95 (vs. 24 in 1974, delta is 5)
+max(BIV$B03-273) # 25.90 (vs. 20 in 1974, delta is 6)
+max(BIV$C03-273) # 25.90 (vs. 18 in 1974, delta is 8)
+
+# Therefore:
+BIV$A03VZ <- BIV$A03-5
+BIV$B03VZ <- BIV$B03-6
+BIV$C03VZ <- BIV$C03-8
+
+# For cockles, this would mean:
+BIV$TRceAVZ <-  exp(TAce/T1-TAce/BIV$A03VZ)*(1+exp(TALce/T1-TALce/TLce)+exp(TAHce/THce-TAHce/T1))/(1+exp(TALce/BIV$A03VZ-TALce/TLce)+exp(TAHce/THce-TAHce/BIV$A03VZ))
+BIV$TRceBVZ <-  exp(TAce/T1-TAce/BIV$B03VZ)*(1+exp(TALce/T1-TALce/TLce)+exp(TAHce/THce-TAHce/T1))/(1+exp(TALce/BIV$B03VZ-TALce/TLce)+exp(TAHce/THce-TAHce/BIV$B03VZ))
+BIV$TRceCVZ <-  exp(TAce/T1-TAce/BIV$C03VZ)*(1+exp(TALce/T1-TALce/TLce)+exp(TAHce/THce-TAHce/T1))/(1+exp(TALce/BIV$C03VZ-TALce/TLce)+exp(TAHce/THce-TAHce/BIV$C03VZ))
+
+# TABEL
+names(BIV)
+sapply(BIV[c(67:69)], mean, na.rm = TRUE)
+sapply(BIV[c(67:69)], sd,   na.rm = TRUE)
+sapply(BIV[c(67:69)], min,  na.rm = TRUE)
+
+
+```
+
+## DEB. FIGURE 5
+```{r}
+## FIGURE 5
+## SUMMARY TABELS FINAL RESULTS 
+
+## TABEL I
+## Average FR in August 2018
+
+# 'NORMAL' DEPTH
+#     EPIBENTHOS                              ENDOBENTHOS
+#                                             Shallow                             Deep
+#     TRcg      TRme      TRmg      TRoe      TRce        TRed        TRrp        TRma      TRmb 
+# A   0.961     0.869     0.866     1.052     1.068       1.044       1.096       1.061     0.818
+# B   0.989     0.884     0.877     1.090     1.066       1.048       1.145       1.077     0.743
+# C   1.005     0.905     0.897     1.097     1.078       1.056       1.170       1.079     0.728
+# NB1: Highest FR for Ruditapes (station C), lowest for Macoma (station C)
+# NB2: For most species, highest FR at station C, but highest FR for Macoma at station A (!)
+
+
+# EXTRA: ADAPTATION IN DEPTH
+#                                             TRceD       TRedD       TRrpD         TRmaS     TRmbS 
+# A    x         x        x           x       1.053       1.039       1.118         x         0.937
+# B    x         x        x           x       1.068       1.051       1.151         x         0.801
+# C    x         x        x           x       1.069       1.052       1.156         x         0.756
+# NB1: If cockles and razor clams would go deeper, this would decrease (!) their FR
+# NB2: If Manila clams would go deeper, this would increase their FR at stations A & B, but not at C
+# NB2: If Baltic tellins would go more shallow, this would increase (!) their FR
+
+# EXTRA: 1974
+#                                             TRceVZ       
+# A    x         x        x          x        0.763       
+# B    x         x        x          x        0.708       
+# C    x         x        x          x        0.618       
+# NB1: FR of cockles lower in 1974 than in 2018 (!)
+# NB2: FR higher at high tidal flats in 1974, whilst FR higher at low tidal flats in 2018 (!)
+
+
+# PLOT FINAL RESULTS
+
+# A. Epibenthos
+par(mfrow = c(1,1))
+
+x.f  <- c(1,2,3)
+y.f  <- c(0,2,4)
+cg.f <- c(0.961,     
+          0.989,     
+          1.005)
+me.f <- c(0.869,     
+          0.884,     
+          0.905)
+mg.f <- c(0.866,     
+          0.877,     
+          0.897)
+oe.f <- c(1.052,     
+          1.090,     
+          1.097)
+
+plot (y = y.f, x = x.f, type = "p", col = "white", ylim = c(0.8,1.2),
+      xlab = "Station", ylab = "Relative physiological rate (-)")
+
+Xrf  <- c(1,3)
+Yrf  <- c(1,1)
+lines(Xrf, Yrf, lty=7,lwd=2, col="grey") # reference (FR=1 at 20C)
+
+lines(x.f, cg.f, lty=1, lwd=2, col=2)
+lines(x.f, me.f, lty=1, lwd=2, col=3)
+lines(x.f, mg.f, lty=1, lwd=2, col=4)
+lines(x.f, oe.f, lty=1, lwd=2, col=5)
+
+legend.txt <- c("C.gigas","M.edulis","M.galloprovincialis","O.edulis")
+legend ("topright", legend = legend.txt,
+        lty = c(1,1,1,1),
+        lwd = c(2,2,2,2),
+        col = c(2,3,4,5),
+        bty = "o", cex = 0.9)
+
+# B. Endobenthos (shallow)
+par(mfrow = c(1,1))
+
+x.f   <- c(1,2,3)
+y.f   <- c(0,2,4)
+ce.f  <- c(1.068,       
+          1.066,       
+          1.078)
+ed.f  <- c(1.044,       
+          1.048,       
+          1.056)
+rp.f  <- c(1.096,       
+          1.145,       
+          1.170)
+ce.fd <- c(1.053,       
+           1.068,       
+           1.069)
+ed.fd <- c(1.039,       
+           1.051,       
+           1.052)
+rp.fd <- c(1.118,         
+           1.151,         
+           1.156)
+
+plot (y = y.f, x = x.f, type = "p", col = "white", ylim = c(1,1.2),
+      xlab = "Station", ylab = "Relative physiological rate (-)")
+
+Xrf  <- c(1,3)
+Yrf  <- c(1,1)
+lines(Xrf, Yrf, lty=7,lwd=2, col="grey") # reference (FR=1 at 20C)
+
+lines(x.f, ce.f, lty=1, lwd=2, col=2)
+lines(x.f, ed.f, lty=1, lwd=2, col=3)
+lines(x.f, rp.f, lty=1, lwd=2, col=4)
+
+lines(x.f, ce.fd, lty=2, lwd=2, col=2)
+lines(x.f, ed.fd, lty=2, lwd=2, col=3)
+lines(x.f, rp.fd, lty=2, lwd=2, col=4)
+
+legend.txt <- c("C.edule","E.directus","R.philippinarum","Ce-15cm","Ed-15cm","Rp-15cm")
+legend ("topleft", legend = legend.txt,
+        lty = c(1,1,1,2,2,2),
+        lwd = c(2,2,2,2,2,2),
+        col = c(2,3,4,2,3,4),
+        bty = "o", cex = 0.9)
+
+# C. Endobenthos (deep)
+par(mfrow = c(1,1))
+
+x.f   <- c(1,2,3)
+y.f   <- c(0,2,4)
+ma.f <- c(0.818,
+          0.743,
+          0.728)
+mb.f  <- c(1.061,     
+           1.077,     
+           1.079)
+mb.fs  <- c(0.937,
+            0.801,
+            0.756)
+
+
+plot (y = y.f, x = x.f, type = "p", col = "white", ylim = c(0.6,1.2),
+      xlab = "Station", ylab = "Relative physiological rate (-)")
+
+Xrf  <- c(1,3)
+Yrf  <- c(1,1)
+lines(Xrf, Yrf, lty=7,lwd=2, col="grey") # reference (FR=1 at 20C)
+
+lines(x.f, ma.f,  lty=1, lwd=2, col=2)
+lines(x.f, mb.f,  lty=1, lwd=2, col=3)
+lines(x.f, mb.fs, lty=2, lwd=2, col=3)
+
+legend.txt <- c("M.arenaria","M.balthica","Mb-3cm")
+legend ("topleft", legend = legend.txt,
+        lty = c(1,1,2),
+        lwd = c(2,2,2),
+        col = c(2,3,3),
+        bty = "o", cex = 0.9)
+
+
+###########
+## FIGURE 6
+## Reduction of maximum physiological rates of intertidal estuarine bivalve species
+## due to growth limitiation or heat stress
+## on a tidal flat at 2 cm above and at 3 cm and 15 cm below the sediment surface
+## in the Mok bay (Texel, the Netherlands) from 7 to 20 August 2018 
+
+TempRange
+
+
+EDmax <- max(TR2ed) 
+MAmax <- max(TR2ma) 
+MBmax <- max(TR2mb) 
+
+
+OEmax <- max(TR2oe) 
+RPmax <- max(TR2rp) 
+
+
+## Epibenthos
+#Cg
+CgOm <- max(TR2cg) # 1.059886 at T=#24 -> 296K (23C)
+CgO  <- 23
+CgL  <-  8
+CgH  <- 27
+
+BIV$CgA.stressed <- NA
+BIV$CgA.stressed[BIV$StatA02cmA <   CgL] <- -2
+BIV$CgA.stressed[BIV$StatA02cmA >=  CgL    & BIV$StatA02cmA <= (CgO-1)] <- -1 
+BIV$CgA.stressed[BIV$StatA02cmA >= (CgO-1) & BIV$StatA02cmA <= (CgO+1)] <-  0 
+BIV$CgA.stressed[BIV$StatA02cmA >  (CgO+1) & BIV$StatA02cmA <= CgH]     <-  1
+BIV$CgA.stressed[BIV$StatA02cmA >   CgH] <-  2
+table(BIV$CgA.stressed)
+
+BIV$CgB.stressed <- NA
+BIV$CgB.stressed[BIV$StatB02cmA <   CgL] <- -2
+BIV$CgB.stressed[BIV$StatB02cmA >=  CgL    & BIV$StatB02cmA <= (CgO-1)] <- -1 
+BIV$CgB.stressed[BIV$StatB02cmA >= (CgO-1) & BIV$StatB02cmA <= (CgO+1)] <-  0 
+BIV$CgB.stressed[BIV$StatB02cmA >  (CgO+1) & BIV$StatB02cmA <= CgH]     <-  1
+BIV$CgB.stressed[BIV$StatB02cmA >   CgH] <-  2
+table(BIV$CgB.stressed)
+
+BIV$CgC.stressed <- NA
+BIV$CgC.stressed[BIV$StatD02cmA <   CgL] <- -2
+BIV$CgC.stressed[BIV$StatD02cmA >=  CgL    & BIV$StatD02cmA <= (CgO-1)] <- -1 
+BIV$CgC.stressed[BIV$StatD02cmA >= (CgO-1) & BIV$StatD02cmA <= (CgO+1)] <-  0 
+BIV$CgC.stressed[BIV$StatD02cmA >  (CgO+1) & BIV$StatD02cmA <= CgH]     <-  1
+BIV$CgC.stressed[BIV$StatD02cmA >   CgH] <-  2
+table(BIV$CgC.stressed)
+
+
+#Me (19)
+MeOm <- max(TR2me) # 1.012954 at T=#20 -> 292K (19C)
+MeO  <- 19
+MeL  <-  2
+MeH  <- 23
+
+BIV$MeA.stressed <- NA
+BIV$MeA.stressed[BIV$StatA02cmA <   MeL] <- -2
+BIV$MeA.stressed[BIV$StatA02cmA >=  MeL    & BIV$StatA02cmA <= (MeO-1)] <- -1 
+BIV$MeA.stressed[BIV$StatA02cmA >= (MeO-1) & BIV$StatA02cmA <= (MeO+1)] <-  0 
+BIV$MeA.stressed[BIV$StatA02cmA >  (MeO+1) & BIV$StatA02cmA <= MeH]     <-  1
+BIV$MeA.stressed[BIV$StatA02cmA >   MeH] <-  2
+table(BIV$MeA.stressed)
+
+BIV$MeB.stressed <- NA
+BIV$MeB.stressed[BIV$StatB02cmA <   MeL] <- -2
+BIV$MeB.stressed[BIV$StatB02cmA >=  MeL    & BIV$StatB02cmA <= (MeO-1)] <- -1 
+BIV$MeB.stressed[BIV$StatB02cmA >= (MeO-1) & BIV$StatB02cmA <= (MeO+1)] <-  0 
+BIV$MeB.stressed[BIV$StatB02cmA >  (MeO+1) & BIV$StatB02cmA <= MeH]     <-  1
+BIV$MeB.stressed[BIV$StatB02cmA >   MeH] <-  2
+table(BIV$MeB.stressed)
+
+BIV$MeC.stressed <- NA
+BIV$MeC.stressed[BIV$StatD02cmA <   MeL] <- -2
+BIV$MeC.stressed[BIV$StatD02cmA >=  MeL    & BIV$StatD02cmA <= (MeO-1)] <- -1 
+BIV$MeC.stressed[BIV$StatD02cmA >= (MeO-1) & BIV$StatD02cmA <= (MeO+1)] <-  0 
+BIV$MeC.stressed[BIV$StatD02cmA >  (MeO+1) & BIV$StatD02cmA <= MeH]     <-  1
+BIV$MeC.stressed[BIV$StatD02cmA >   MeH] <-  2
+table(BIV$MeC.stressed)
+
+#Mg (18)
+MgOm <- max(TR2mg) # 1.023968 at T=#19 -> 291K (18C)
+MgO  <- 18
+MgL  <-  2
+MgH  <- 23
+
+BIV$MgA.stressed <- NA
+BIV$MgA.stressed[BIV$StatA02cmA <   MgL] <- -2
+BIV$MgA.stressed[BIV$StatA02cmA >=  MgL    & BIV$StatA02cmA <= (MgO-1)] <- -1 
+BIV$MgA.stressed[BIV$StatA02cmA >= (MgO-1) & BIV$StatA02cmA <= (MgO+1)] <-  0 
+BIV$MgA.stressed[BIV$StatA02cmA >  (MgO+1) & BIV$StatA02cmA <= MgH]     <-  1
+BIV$MgA.stressed[BIV$StatA02cmA >   MgH] <-  2
+table(BIV$MgA.stressed)
+
+BIV$MgB.stressed <- NA
+BIV$MgB.stressed[BIV$StatB02cmA <   MgL] <- -2
+BIV$MgB.stressed[BIV$StatB02cmA >=  MgL    & BIV$StatB02cmA <= (MgO-1)] <- -1 
+BIV$MgB.stressed[BIV$StatB02cmA >= (MgO-1) & BIV$StatB02cmA <= (MgO+1)] <-  0 
+BIV$MgB.stressed[BIV$StatB02cmA >  (MgO+1) & BIV$StatB02cmA <= MgH]     <-  1
+BIV$MgB.stressed[BIV$StatB02cmA >   MgH] <-  2
+table(BIV$MgB.stressed)
+
+BIV$MgC.stressed <- NA
+BIV$MgC.stressed[BIV$StatD02cmA <   MgL] <- -2
+BIV$MgC.stressed[BIV$StatD02cmA >=  MgL    & BIV$StatD02cmA <= (MgO-1)] <- -1 
+BIV$MgC.stressed[BIV$StatD02cmA >= (MgO-1) & BIV$StatD02cmA <= (MgO+1)] <-  0 
+BIV$MgC.stressed[BIV$StatD02cmA >  (MgO+1) & BIV$StatD02cmA <= MgH]     <-  1
+BIV$MgC.stressed[BIV$StatD02cmA >   MgH] <-  2
+table(BIV$MgC.stressed)
+
+#Oe (26)
+OeOm <- max(TR2Oe) # 1.448982 at T=#27 -> 299K (26C)
+OeO  <- 26
+OeL  <- 13
+OeH  <- 30
+
+BIV$OeA.stressed <- NA
+BIV$OeA.stressed[BIV$StatA02cmA <   OeL] <- -2
+BIV$OeA.stressed[BIV$StatA02cmA >=  OeL    & BIV$StatA02cmA <= (OeO-1)] <- -1 
+BIV$OeA.stressed[BIV$StatA02cmA >= (OeO-1) & BIV$StatA02cmA <= (OeO+1)] <-  0 
+BIV$OeA.stressed[BIV$StatA02cmA >  (OeO+1) & BIV$StatA02cmA <= OeH]     <-  1
+BIV$OeA.stressed[BIV$StatA02cmA >   OeH] <-  2
+table(BIV$OeA.stressed)
+
+BIV$OeB.stressed <- NA
+BIV$OeB.stressed[BIV$StatB02cmA <   OeL] <- -2
+BIV$OeB.stressed[BIV$StatB02cmA >=  OeL    & BIV$StatB02cmA <= (OeO-1)] <- -1 
+BIV$OeB.stressed[BIV$StatB02cmA >= (OeO-1) & BIV$StatB02cmA <= (OeO+1)] <-  0 
+BIV$OeB.stressed[BIV$StatB02cmA >  (OeO+1) & BIV$StatB02cmA <= OeH]     <-  1
+BIV$OeB.stressed[BIV$StatB02cmA >   OeH] <-  2
+table(BIV$OeB.stressed)
+
+BIV$OeC.stressed <- NA
+BIV$OeC.stressed[BIV$StatD02cmA <   OeL] <- -2
+BIV$OeC.stressed[BIV$StatD02cmA >=  OeL    & BIV$StatD02cmA <= (OeO-1)] <- -1 
+BIV$OeC.stressed[BIV$StatD02cmA >= (OeO-1) & BIV$StatD02cmA <= (OeO+1)] <-  0 
+BIV$OeC.stressed[BIV$StatD02cmA >  (OeO+1) & BIV$StatD02cmA <= OeH]     <-  1
+BIV$OeC.stressed[BIV$StatD02cmA >   OeH] <-  2
+table(BIV$OeC.stressed)
+
+
+## Shallow endobenthos
+#Ce (29)
+CeOm <- max(TR2ce) # 1.598104 at T=#30 -> 302K (29C)
+CeO  <- 29
+CeL  <-  5
+CeH  <- 33
+
+BIV$CeA.stressed <- NA
+BIV$CeA.stressed[BIV$StatA03cmU <   CeL] <- -2
+BIV$CeA.stressed[BIV$StatA03cmU >=  CeL    & BIV$StatA03cmU <= (CeO-1)] <- -1 
+BIV$CeA.stressed[BIV$StatA03cmU >= (CeO-1) & BIV$StatA03cmU <= (CeO+1)] <-  0 
+BIV$CeA.stressed[BIV$StatA03cmU >  (CeO+1) & BIV$StatA03cmU <= CeH]     <-  1
+BIV$CeA.stressed[BIV$StatA03cmU >   CeH] <-  2
+table(BIV$CeA.stressed)
+
+BIV$CeB.stressed <- NA
+BIV$CeB.stressed[BIV$StatB03cmU <   CeL] <- -2
+BIV$CeB.stressed[BIV$StatB03cmU >=  CeL    & BIV$StatB03cmU <= (CeO-1)] <- -1 
+BIV$CeB.stressed[BIV$StatB03cmU >= (CeO-1) & BIV$StatB03cmU <= (CeO+1)] <-  0 
+BIV$CeB.stressed[BIV$StatB03cmU >  (CeO+1) & BIV$StatB03cmU <= CeH]     <-  1
+BIV$CeB.stressed[BIV$StatB03cmU >   CeH] <-  2
+table(BIV$CeB.stressed)
+
+BIV$CeC.stressed <- NA
+BIV$CeC.stressed[BIV$StatD03cmU <   CeL] <- -2
+BIV$CeC.stressed[BIV$StatD03cmU >=  CeL    & BIV$StatD03cmU <= (CeO-1)] <- -1 
+BIV$CeC.stressed[BIV$StatD03cmU >= (CeO-1) & BIV$StatD03cmU <= (CeO+1)] <-  0 
+BIV$CeC.stressed[BIV$StatD03cmU >  (CeO+1) & BIV$StatD03cmU <= CeH]     <-  1
+BIV$CeC.stressed[BIV$StatD03cmU >   CeH] <-  2
+table(BIV$CeC.stressed)
+
+
+#Ed (30)
+EdOm <- max(TR2Ed) # 1.353138 at T=#31 -> 303K (30C)
+EdO  <- 30
+EdL  <-  5
+EdH  <- 33
+
+BIV$EdA.stressed <- NA
+BIV$EdA.stressed[BIV$StatA03cmU <   EdL] <- -2
+BIV$EdA.stressed[BIV$StatA03cmU >=  EdL    & BIV$StatA03cmU <= (EdO-1)] <- -1 
+BIV$EdA.stressed[BIV$StatA03cmU >= (EdO-1) & BIV$StatA03cmU <= (EdO+1)] <-  0 
+BIV$EdA.stressed[BIV$StatA03cmU >  (EdO+1) & BIV$StatA03cmU <= EdH]     <-  1
+BIV$EdA.stressed[BIV$StatA03cmU >   EdH] <-  2
+table(BIV$EdA.stressed)
+
+BIV$EdB.stressed <- NA
+BIV$EdB.stressed[BIV$StatB03cmU <   EdL] <- -2
+BIV$EdB.stressed[BIV$StatB03cmU >=  EdL    & BIV$StatB03cmU <= (EdO-1)] <- -1 
+BIV$EdB.stressed[BIV$StatB03cmU >= (EdO-1) & BIV$StatB03cmU <= (EdO+1)] <-  0 
+BIV$EdB.stressed[BIV$StatB03cmU >  (EdO+1) & BIV$StatB03cmU <= EdH]     <-  1
+BIV$EdB.stressed[BIV$StatB03cmU >   EdH] <-  2
+table(BIV$EdB.stressed)
+
+BIV$EdC.stressed <- NA
+BIV$EdC.stressed[BIV$StatD03cmU <   EdL] <- -2
+BIV$EdC.stressed[BIV$StatD03cmU >=  EdL    & BIV$StatD03cmU <= (EdO-1)] <- -1 
+BIV$EdC.stressed[BIV$StatD03cmU >= (EdO-1) & BIV$StatD03cmU <= (EdO+1)] <-  0 
+BIV$EdC.stressed[BIV$StatD03cmU >  (EdO+1) & BIV$StatD03cmU <= EdH]     <-  1
+BIV$EdC.stressed[BIV$StatD03cmU >   EdH] <-  2
+table(BIV$EdC.stressed)
+
+
+#Rp
+RpOm <- max(TR2Rp) # 1.886397 at T=#27 -> 299K (26C)
+RpO  <- 26
+RpL  <- 17
+RpH  <- 27
+
+BIV$RpA.stressed <- NA
+BIV$RpA.stressed[BIV$StatA03cmU <   RpL] <- -2
+BIV$RpA.stressed[BIV$StatA03cmU >=  RpL    & BIV$StatA03cmU <= (RpO-1)] <- -1 
+BIV$RpA.stressed[BIV$StatA03cmU >= (RpO-1) & BIV$StatA03cmU <= (RpO+1)] <-  0 
+BIV$RpA.stressed[BIV$StatA03cmU >  (RpO+1) & BIV$StatA03cmU <= RpH]     <-  1
+BIV$RpA.stressed[BIV$StatA03cmU >   RpH] <-  2
+table(BIV$RpA.stressed)
+
+BIV$RpB.stressed <- NA
+BIV$RpB.stressed[BIV$StatB03cmU <   RpL] <- -2
+BIV$RpB.stressed[BIV$StatB03cmU >=  RpL    & BIV$StatB03cmU <= (RpO-1)] <- -1 
+BIV$RpB.stressed[BIV$StatB03cmU >= (RpO-1) & BIV$StatB03cmU <= (RpO+1)] <-  0 
+BIV$RpB.stressed[BIV$StatB03cmU >  (RpO+1) & BIV$StatB03cmU <= RpH]     <-  1
+BIV$RpB.stressed[BIV$StatB03cmU >   RpH] <-  2
+table(BIV$RpB.stressed)
+
+BIV$RpC.stressed <- NA
+BIV$RpC.stressed[BIV$StatD03cmU <   RpL] <- -2
+BIV$RpC.stressed[BIV$StatD03cmU >=  RpL    & BIV$StatD03cmU <= (RpO-1)] <- -1 
+BIV$RpC.stressed[BIV$StatD03cmU >= (RpO-1) & BIV$StatD03cmU <= (RpO+1)] <-  0 
+BIV$RpC.stressed[BIV$StatD03cmU >  (RpO+1) & BIV$StatD03cmU <= RpH]     <-  1
+BIV$RpC.stressed[BIV$StatD03cmU >   RpH] <-  2
+table(BIV$RpC.stressed)
+
+
+## Deep endobenthos
+# Ma (29)
+MaOm <- max(TR2Ma) # 1.631560 at T=#30 -> 302K (29C)
+MaO  <- 29
+MaL  <-  5
+MaH  <- 33
+
+BIV$MaA.stressed <- NA
+BIV$MaA.stressed[BIV$StatA15cmU <   MaL] <- -2
+BIV$MaA.stressed[BIV$StatA15cmU >=  MaL    & BIV$StatA15cmU <= (MaO-1)] <- -1 
+BIV$MaA.stressed[BIV$StatA15cmU >= (MaO-1) & BIV$StatA15cmU <= (MaO+1)] <-  0 
+BIV$MaA.stressed[BIV$StatA15cmU >  (MaO+1) & BIV$StatA15cmU <= MaH]     <-  1
+BIV$MaA.stressed[BIV$StatA15cmU >   MaH] <-  2
+table(BIV$MaA.stressed)
+
+BIV$MaB.stressed <- NA
+BIV$MaB.stressed[BIV$StatB15cmU <   MaL] <- -2
+BIV$MaB.stressed[BIV$StatB15cmU >=  MaL    & BIV$StatB15cmU <= (MaO-1)] <- -1 
+BIV$MaB.stressed[BIV$StatB15cmU >= (MaO-1) & BIV$StatB15cmU <= (MaO+1)] <-  0 
+BIV$MaB.stressed[BIV$StatB15cmU >  (MaO+1) & BIV$StatB15cmU <= MaH]     <-  1
+BIV$MaB.stressed[BIV$StatB15cmU >   MaH] <-  2
+table(BIV$MaB.stressed)
+
+BIV$MaC.stressed <- NA
+BIV$MaC.stressed[BIV$StatD15cmU <   MaL] <- -2
+BIV$MaC.stressed[BIV$StatD15cmU >=  MaL    & BIV$StatD15cmU <= (MaO-1)] <- -1 
+BIV$MaC.stressed[BIV$StatD15cmU >= (MaO-1) & BIV$StatD15cmU <= (MaO+1)] <-  0 
+BIV$MaC.stressed[BIV$StatD15cmU >  (MaO+1) & BIV$StatD15cmU <= MaH]     <-  1
+BIV$MaC.stressed[BIV$StatD15cmU >   MaH] <-  2
+table(BIV$MaC.stressed)
+
+
+# Mb
+MbOm <- max(TR2Mb) # 3.798177 at T=#15 -> 287K (14C)
+MbO  <- 14
+MbL  <-  0
+MbH  <- 17
+
+BIV$MbA.stressed <- NA
+BIV$MbA.stressed[BIV$StatA15cmU <   MbL] <- -2
+BIV$MbA.stressed[BIV$StatA15cmU >=  MbL    & BIV$StatA15cmU <= (MbO-1)] <- -1 
+BIV$MbA.stressed[BIV$StatA15cmU >= (MbO-1) & BIV$StatA15cmU <= (MbO+1)] <-  0 
+BIV$MbA.stressed[BIV$StatA15cmU >  (MbO+1) & BIV$StatA15cmU <= MbH]     <-  1
+BIV$MbA.stressed[BIV$StatA15cmU >   MbH] <-  2
+table(BIV$MbA.stressed)
+
+BIV$MbB.stressed <- NA
+BIV$MbB.stressed[BIV$StatB15cmU <   MbL] <- -2
+BIV$MbB.stressed[BIV$StatB15cmU >=  MbL    & BIV$StatB15cmU <= (MbO-1)] <- -1 
+BIV$MbB.stressed[BIV$StatB15cmU >= (MbO-1) & BIV$StatB15cmU <= (MbO+1)] <-  0 
+BIV$MbB.stressed[BIV$StatB15cmU >  (MbO+1) & BIV$StatB15cmU <= MbH]     <-  1
+BIV$MbB.stressed[BIV$StatB15cmU >   MbH] <-  2
+table(BIV$MbB.stressed)
+
+BIV$MbC.stressed <- NA
+BIV$MbC.stressed[BIV$StatD15cmU <   MbL] <- -2
+BIV$MbC.stressed[BIV$StatD15cmU >=  MbL    & BIV$StatD15cmU <= (MbO-1)] <- -1 
+BIV$MbC.stressed[BIV$StatD15cmU >= (MbO-1) & BIV$StatD15cmU <= (MbO+1)] <-  0 
+BIV$MbC.stressed[BIV$StatD15cmU >  (MbO+1) & BIV$StatD15cmU <= MbH]     <-  1
+BIV$MbC.stressed[BIV$StatD15cmU >   MbH] <-  2
+table(BIV$MbC.stressed)
+
+
+## END OF SCRIPT (30/8/22; 09:30)
+#################################
+```

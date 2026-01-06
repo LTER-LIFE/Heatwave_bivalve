@@ -1,0 +1,1217 @@
+---
+title: "Analyse and model sediment temperature data from Mokbai"
+author: "Qing ZHan & Qi Liu"
+date: "2025-10"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  fig.align = 'center',  # Center all figures
+  tidy.opts = list(width.cutoff = 60),
+  tidy = TRUE
+)
+```
+
+
+```{r message=FALSE}
+# devtools::install_github("dynamic-R/TempSED", depend=TRUE)
+# require(sedTemp)
+require(TempSED)
+require(deSolve)
+require(rootSolve)
+require(ReacTran) # for setup.grid.1D function
+require(readxl) # for reading sediment temperature sensor xlsx data
+require(dplyr)
+require(stringr)
+require(ncdf4) #for dealing with netCDF data (metero data)
+SL <- Sys.getlocale("LC_TIME")
+Sys.setlocale("LC_TIME", "C")
+```
+
+# 1.Data processing
+
+## 1.1 Sediment temperature data
+
+
+### 1.1.1 read
+```{r}
+# Packages
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+
+
+# --- NEW: read the Mok Excel and make the same long format ---
+process_mok_excel <- function(file, sheet = "Data4R") {
+  # read sheet
+  df <- read_excel(file, sheet = sheet)
+
+  # build DateTime from components (seconds assumed 0)
+  df <- df %>%
+    mutate(
+      DateTime = as.POSIXct(
+        ISOdatetime(Year, Month, Day, Hour, Minute, 0, tz = "CET"),
+        tz = "CET"
+      )
+    )
+
+  # gather all Stat* columns long
+  mok_long <- df %>%
+    pivot_longer(
+      cols = starts_with("Stat"),
+      names_to = "Var",
+      values_to = "Temperature"
+    ) %>%
+    mutate(
+      # Station letter after "Stat"
+      Station = str_match(Var, "(?<=Stat)[A-Z]")[,1],
+      # numeric depth in cm from "...02cm..." -> 2, 3, 15, etc.
+      Depth   = as.numeric(str_match(Var, "(\\d+)(?=cm)")[,2])
+    ) %>%
+    select(DateTime, Temperature, Station, Depth) %>%
+    arrange(DateTime, Station, Depth)
+
+  # add Second column using the same origin as your CSV flow
+  origin <- as.POSIXct("2018-08-07 00:00:00", tz = "CET")
+  mok_long$Second <- as.double(julian(mok_long$DateTime, origin = origin) * 86400)
+
+  mok_long
+}
+
+# --- paths (use forward slashes on Windows in R) ---
+file_mok_excel <- "C:/Users/qliu/OneDrive - NIOZ/Bureaublad/PhD research/model/sediment temperature model/sedTemp2.0toBrenda/data/DataQing/20210830b_Mok_data-results.xlsx"
+
+# --- build datasets ---
+
+Mok_data        <- process_mok_excel(file_mok_excel, sheet = "Data4R")
+
+
+# Quick peek
+head(Mok_data)
+
+
+```
+### 1.1.2 plot
+```{r}
+visualize_Mok_data <- function(Mok_data,
+                               color_by = "Depth",   # "Depth" or "Station"
+                               facet_by = "Station", # "Station", "Depth" or NULL
+                               time_limits = NULL,
+                               title = "Mok sediment temperature time series") {
+  library(ggplot2)
+  library(viridis)
+
+  df <- Mok_data
+
+  # Ensure DateTime is POSIXct
+  if (!inherits(df$DateTime, "POSIXct"))
+    df$DateTime <- as.POSIXct(df$DateTime, tz = "CET")
+
+  # Filter by date if specified
+  if (!is.null(time_limits)) {
+    time_limits <- as.POSIXct(time_limits, tz = "CET")
+    df <- subset(df, DateTime >= time_limits[1] & DateTime <= time_limits[2])
+  }
+
+  # Convert to factor if color_by is categorical
+  if (color_by == "Depth") df$Depth <- as.factor(df$Depth)
+  if (color_by == "Station") df$Station <- as.factor(df$Station)
+
+  # Base plot (use tidy eval)
+  p <- ggplot(df, aes(x = DateTime, y = Temperature, color = .data[[color_by]])) +
+    geom_line(linewidth = 0.7) +
+    labs(
+      x = "DateTime (CET)",
+      y = "Temperature (°C)",
+      color = color_by,
+      title = title
+    ) +
+    theme_bw(base_size = 12) +
+    scale_color_viridis_d(option = "viridis", end = 0.9) +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      legend.position = "right",
+      panel.grid.minor = element_blank()
+    )
+
+  # Facet if requested
+  if (!is.null(facet_by)) {
+    p <- p + facet_wrap(as.formula(paste("~", facet_by)), scales = "free_y")
+  }
+
+  print(p)
+}
+
+
+```
+
+```{r, fig.height=3, fig.width=9}
+visualize_Mok_data(Mok_data, color_by = "Depth", facet_by = "Station")
+
+```
+
+
+## 1.2 Meteorological data from KNMI
+
+ 
+### 1.2.1 See the data structure
+```{r}
+# Open the netCDF file
+nc_data <- nc_open("../data/DataQing/Forcings_DeKooy_20180807to20180820.nc")
+
+# View the structure of the netCDF file
+print(nc_data)
+
+# Get the variable names
+variables <- names(nc_data$var)
+print(variables)
+
+# Get the dimension names
+dimensions <- names(nc_data$dim)
+print(dimensions)
+
+# Access a dimension (replace "dimension_name" with the actual name)
+dim_data <- nc_data$dim$station$vals
+
+# View the dimension data
+print(dim_data)
+```
+
+### 1.2.2 A function to convert data format
+```{r}
+MeteroDataProcess <- function(nc_file="../data/DataQing/Forcings_DeKooy_20180807to20180820.nc", start_date=as.POSIXct("2024-07-01 00:00:00", tz = "CET"), end_date=as.POSIXct("2024-11-01 00:00:00", tz = "CET")){
+
+# Open the netCDF file
+nc_data <- nc_open(nc_file)
+
+# Read the variables
+time <- ncvar_get(nc_data, "time")  # Time in seconds since 1970-01-01 00:00:00
+ff_10m_10 <- ncvar_get(nc_data, "ff_10m_10")  # Wind speed, m/s
+p_nap_msl_10 <- ncvar_get(nc_data, "p_nap_msl_10")*100  # Air pressure, from hpa to pa
+n_ceilom_10 <- ncvar_get(nc_data, "n_ceilom_10")/8  # Cloud cover, from 0-8 to 0-1
+q_glob_10 <- ncvar_get(nc_data, "q_glob_10")  # Radiation, W/m2
+t_dryb_10 <- ncvar_get(nc_data, "t_dryb_10")  # Air temperature, °C
+u_10 <- ncvar_get(nc_data, "u_10")/100  # Relative humidity, from % to 0-1
+
+# Convert time from UTC to CEST
+time_utc <- as.POSIXct(time, origin = "1970-01-01", tz = "UTC")
+time_cest <- as.POSIXct(format(time_utc, tz = "CET", usetz = TRUE), tz = "CET")
+#time_cest <- as.POSIXct(time, origin = "1970-01-01", tz = "UTC")
+
+
+# Subset the data within the date range
+valid_indices <- which(time_cest >= start_date & time_cest <= end_date)
+
+# Subset each variable based on valid_indices
+time_cest <- time_cest[valid_indices]
+ff_10m_10 <- ff_10m_10[valid_indices]
+p_nap_msl_10 <- p_nap_msl_10[valid_indices]
+n_ceilom_10 <- n_ceilom_10[valid_indices]
+q_glob_10 <- q_glob_10[valid_indices]
+t_dryb_10 <- t_dryb_10[valid_indices]
+u_10 <- u_10[valid_indices]
+
+# Create the "Second" column with seconds since the start date
+seconds <- as.numeric(difftime(time_cest, start_date, units = "secs"))
+
+# Combine data into a data frame
+df <- data.frame(
+  Time = time_cest,
+  windSpeed = ff_10m_10,
+  airPressure = p_nap_msl_10,
+  cloudCover = n_ceilom_10,
+  radiation = q_glob_10,
+  airTemperature = t_dryb_10,
+  airHumidity = u_10,
+  Second = seconds
+)
+
+# Close the netCDF file
+nc_close(nc_data)
+
+# View the first few rows of the data frame
+return(df)
+}
+```
+
+```{r}
+ForcingsDeKooyAirport <- MeteroDataProcess(nc_file="../data/DataQing/Forcings_DeKooy_20180807to20180820.nc", start_date=as.POSIXct("2018-08-07 00:00:00", tz = "CET"), end_date=as.POSIXct("2018-08-21 00:00:00", tz = "CET"))
+head(ForcingsDeKooyAirport)
+```
+
+### 1.2.3 Plot meteo data
+```{r, fig.width=10, fig.height=12}
+par(mfrow = c(3,2), mar= c(2,5,2,2), las=1, cex=1.5)
+with(ForcingsDeKooyAirport, plot(Time, windSpeed, type="l", 
+     main="Wind speed",      ylab="m/s"))
+with(ForcingsDeKooyAirport, plot(Time, airTemperature, type="l", ylim=c(0,30), main="Air temperature", ylab= "°C"))
+with(ForcingsDeKooyAirport, plot(Time, radiation, type="l", 
+     main="Radiation", ylab="W/m²"))
+with(ForcingsDeKooyAirport, plot(Time, airPressure/1000,    type="l", 
+     main="Air pressure",    ylab="kPa"))
+with(ForcingsDeKooyAirport, plot(Time, cloudCover,      type="l", 
+     main="Cloud cover",     ylab="-"))
+with(ForcingsDeKooyAirport, plot(Time, airHumidity,      type="l", 
+     main="Air humidity",   ylab="-"))
+```
+
+## 1.3 Water level data from RWS
+
+
+```{r}
+# Load data
+RWS <- read.csv2("../data/DataQing/WaterData_20180807to20180820.csv")
+
+# Combine date and time into a single POSIXct column
+RWS$Time <- as.POSIXct(
+  paste(RWS$WAARNEMINGDATUM, RWS$WAARNEMINGTIJD..MET.CET.),
+  format = "%d-%m-%Y %H:%M:%S", tz = "CET"
+)
+
+# Extract unique stations with their coordinates
+stations <- unique(RWS[, c("MEETPUNT_IDENTIFICATIE", "X", "Y")])
+```
+
+
+### 1.3.1 Plot RWS water level and T data 
+
+```{r}
+# Plot station positions
+with(stations, plot(X, Y, col = 1:nrow(stations), pch = 16, main = "Station Positions", xlab = "X", ylab = "Y"))
+legend("bottomright", col = 1:nrow(stations), legend = stations$MEETPUNT_IDENTIFICATIE, pch = 16, cex = 0.5)
+
+# List of all stations and their identifiers
+station_ids <- unique(RWS$MEETPUNT_IDENTIFICATIE)
+
+# Create a list to store Temperature and Water Level data for all stations
+WaterForcingsRWSWaddenSea <- lapply(station_ids, function(station) {
+  temp_data <- subset(RWS, GROOTHEID_OMSCHRIJVING == "Temperatuur" & MEETPUNT_IDENTIFICATIE == station)
+  water_data <- subset(RWS, GROOTHEID_OMSCHRIJVING == "Waterhoogte" & MEETPUNT_IDENTIFICATIE == station)
+  
+  # Remove extreme values for Temperature and Water Level
+  if (nrow(temp_data) > 0) {
+    temp_data <- temp_data[temp_data$NUMERIEKEWAARDE < quantile(temp_data$NUMERIEKEWAARDE, 0.99, na.rm = TRUE), ]
+  }
+  if (nrow(water_data) > 0) {
+    water_data <- water_data[water_data$NUMERIEKEWAARDE < quantile(water_data$NUMERIEKEWAARDE, 0.99, na.rm = TRUE), ]
+  }
+  
+  list(Temperature = temp_data, WaterLevel = water_data)
+})
+names(WaterForcingsRWSWaddenSea) <- station_ids
+
+# Plot Temperature (T) for all stations
+par(mar = c(4, 4, 2, 1))  # Adjust layout for multiple plots
+for (station in names(WaterForcingsRWSWaddenSea)) {
+  temp_data <- WaterForcingsRWSWaddenSea[[station]]$Temperature
+  if (nrow(temp_data) > 0) {
+    plot(temp_data$Time, temp_data$NUMERIEKEWAARDE, type = "l", col = "blue",
+         main = paste("Temperature -", station),ylim=c(0,35),
+         xlab = "Time", ylab = expression("Temperature (" * degree * "C)"))
+  }
+}
+
+# Plot Water Level (H) for all stations
+for (station in names(WaterForcingsRWSWaddenSea)) {
+  water_data <- WaterForcingsRWSWaddenSea[[station]]$WaterLevel
+  if (nrow(water_data) > 0) {
+    plot(water_data$Time, water_data$NUMERIEKEWAARDE, type = "l", col = "green",
+         main = paste("Water Level -", station),
+         xlab = "Time", ylab = "Water Level (cm)", ylim = c(-350, 350))
+  }
+}
+```
+
+# 2. Save all the data so we don't have to run data processing again
+```{r}
+#sed T observation
+# save(Mok_data, file = "../data/DataQing/Mok_data.rda")
+load("C:\\Users\\qzhan\\OneDrive - NIOZ\\Attachments\\01_LTER-LIFE\\04_Bivalve_larvea\\Modelling/DataQing/Mok_data.rda")
+
+#weather forcings
+# save(ForcingsDeKooyAirport, file = "../data/DataQing/ForcingsDeKooyAirport.rda")
+load("C:\\Users\\qzhan\\OneDrive - NIOZ\\Attachments\\01_LTER-LIFE\\04_Bivalve_larvea\\Modelling/DataQing/ForcingsDeKooyAirport.rda")
+
+#water forcings from RWS
+# save(WaterForcingsRWSWaddenSea, file = "../data/DataQing/WaterForcingsRWSWaddenSea.rda")
+load("C:\\Users\\qzhan\\OneDrive - NIOZ\\Attachments\\01_LTER-LIFE\\04_Bivalve_larvea\\Modelling/DataQing/WaterForcingsRWSWaddenSea.rda")
+```
+
+# 3.Model-data fit
+
+## 3.1 Create forcing functions
+
+### 3.1.1 Meteo functions
+```{r}
+# Forcing functions
+fWind_WaS.wad      <-   ForcingsDeKooyAirport[,c("Second", "windSpeed")]
+fRad_WaS.wad       <-   ForcingsDeKooyAirport[,c("Second", "radiation")]
+fTair_WaS.wad      <-   ForcingsDeKooyAirport[,c("Second", "airTemperature")]
+fPair_WaS.wad      <-   ForcingsDeKooyAirport[,c("Second", "airPressure")]
+fHumidity_WaS.wad  <-   ForcingsDeKooyAirport[,c("Second", "airHumidity")]
+fCloud_WaS.wad     <-   ForcingsDeKooyAirport[,c("Second", "cloudCover")]
+```
+
+### 3.1.2 Water level functions
+```{r}
+# Set the origin date-time
+origin <- as.POSIXct("2018-08-07 00:00:00", tz = "CET")
+
+# Function to process the water level data for Vvk or Balgzand and return only the required columns
+process_water_level <- function(data, station_name, depth_offset) {
+  # Convert Time to seconds
+  data$Second <- as.double(julian(data$Time, origin = origin) * 86400)
+  
+  # Adjust water level values based on the station (Vvk or Balgzand)
+  data$H.m <- (data$NUMERIEKEWAARDE - depth_offset) / 100
+  
+  # Replace negative water level values with 0
+  data$H.m[data$H.m < 0] <- 0
+  
+  # Keep only the columns 'Second' and 'H.m'
+  data <- data[, c("Second", "H.m")]
+  
+  return(data)
+}
+
+# Process the data
+
+
+#2. use Den Helder, veersteiger water H
+# For A station
+fHeight_A_Den.wad <- process_water_level(WaterForcingsRWSWaddenSea$`Den Helder, veersteiger`$WaterLevel, "A", -9)
+# For B station
+fHeight_B_Den.wad <- process_water_level(WaterForcingsRWSWaddenSea$`Den Helder, veersteiger`$WaterLevel, "B", -33)
+# For D station
+fHeight_D_Den.wad <- process_water_level(WaterForcingsRWSWaddenSea$`Den Helder, veersteiger`$WaterLevel, "D", -74)
+
+
+# View the processed data
+
+
+head(fHeight_A_Den.wad)
+head(fHeight_B_Den.wad)
+head(fHeight_D_Den.wad)
+
+```
+
+### 3.1.3 Water T function
+```{r}
+# Function to process the water temperature data for "Monding Nieuwe Haven" and return only the required columns
+process_temperature_data <- function(data) {
+  # Convert Time to seconds
+  data$Second <- as.double(julian(data$Time, origin = origin) * 86400)
+  
+  data$Temperature <- data$NUMERIEKEWAARDE
+  
+  # Keep only the columns 'Second' and 'Temperature'
+  data <- data[, c("Second", "Temperature")]
+  
+  return(data)
+}
+
+# Process the data for 'Den Helder, veersteiger'
+fTwater_Den.wad <- process_temperature_data(WaterForcingsRWSWaddenSea$`Den Helder, veersteiger`$Temperature)
+
+# View the processed data
+head(fTwater_Den.wad)
+```
+
+```{r}
+# --- Generate in-memory fTwater_*.wad data frames from Mok_data ---
+generate_fTwater_data <- function(Mok_data) {
+  library(dplyr)
+  
+  stopifnot(all(c("Station", "Depth", "Second", "Temperature") %in% names(Mok_data)))
+  
+  # Normalize time to start at 0
+  Mok_data <- Mok_data %>%
+    mutate(Second = Second - min(Second, na.rm = TRUE))
+  
+  # Function to extract by station
+  extract_station <- function(station) {
+    Mok_data %>%
+      filter(Station == station, Depth == 2) %>%
+      arrange(Second) %>%
+      select(Second, Temperature)
+  }
+  
+  # Create each data frame
+  fTwater_A.wad <- extract_station("A")
+  fTwater_B.wad <- extract_station("B")
+  fTwater_D.wad <- extract_station("D")
+  
+  # Return all as a named list (and keep also as objects in global env)
+  assign("fTwater_A.wad", fTwater_A.wad, envir = .GlobalEnv)
+  assign("fTwater_B.wad", fTwater_B.wad, envir = .GlobalEnv)
+  assign("fTwater_D.wad", fTwater_D.wad, envir = .GlobalEnv)
+  
+  message("✅ Created in-memory data frames: fTwater_A.wad, fTwater_B.wad, fTwater_D.wad")
+  
+  invisible(list(A = fTwater_A.wad,
+                 B = fTwater_B.wad,
+                 D = fTwater_D.wad))
+}
+
+# ---- Example usage ----
+result <- generate_fTwater_data(Mok_data)
+
+# Access them directly:
+head(fTwater_A.wad)
+head(fTwater_B.wad)
+head(fTwater_D.wad)
+
+```
+
+```{r, fig.height=3, fig.width=5}
+plot(fTwater_Den.wad, ylim=c(10, 35), col="black", t="l")
+lines(fTwater_A.wad, col=2)
+lines(fTwater_B.wad, col=3)
+lines(fTwater_D.wad, col=4)
+
+legend("topright", legend = c("RWS temperature", "Station A interface", "Station B", "Station D"),
+       col = 1:4, lty=1)
+
+```
+
+
+## 3.2 Create observation data
+```{r}
+# Function to create the observation data from SedTempDataWaddenSea
+create_observation_data <- function(data, station_name, depth) {
+  # Filter the data by the given station and depth
+  station_data <- subset(data, Station == station_name & Depth == depth)
+  
+  # Create a new data frame with the 'Time' and 'Temperature' columns
+  obs_data <- data.frame(
+    Time = station_data$DateTime,         # Use DateTime as Time
+    Temperature = station_data$Temperature  # Use Temperature as Temperature
+  )
+  
+  # Return the resulting data frame
+  return(obs_data)
+}
+
+
+# Create Obsdat_Vvk from SedTempDataWaddenSea
+Obsdat_A_3cm <- create_observation_data(Mok_data, "A", 3)
+Obsdat_A_15cm <- create_observation_data(Mok_data, "A", 15)
+
+# Create Obsdat_Balgzand from SedTempDataWaddenSea
+Obsdat_B_3cm <- create_observation_data(Mok_data, "B", 3)
+Obsdat_B_15cm <- create_observation_data(Mok_data, "B", 15)
+
+Obsdat_D_3cm <- create_observation_data(Mok_data, "D", 3)
+Obsdat_D_15cm <- create_observation_data(Mok_data, "D", 15)
+
+# View the first few rows of Obsdat_Vvk and Obsdat_Balgzand
+head(Obsdat_A_3cm)
+head(Obsdat_B_3cm)
+head(Obsdat_D_3cm)
+
+head(Obsdat_A_15cm)
+head(Obsdat_B_15cm)
+head(Obsdat_D_15cm)
+```
+
+
+## 3.3 Run model
+
+### 3.3.1 A
+
+#### A Parameters
+
+The initial guess of parameters are from muddy sediment (Zandkreek) fitting of Ricky's data
+
+```{r}
+porfun <- function(x) return(0.45 + (1-0.45) * exp(-x*50))
+
+length.z <- 10
+dz.1     <- 1e-4
+
+Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z)
+por      <- setup.prop.1D(func=porfun, grid=Grid)
+
+plot(por, grid=Grid, xyswap=TRUE, xlim=c(0,1), ylim=c(0.1,0), xlab="Porosity", ylab="Depth(m)", t="l"); abline(h=0, lty=2)
+```
+
+
+```{r}
+# parameters
+emAir     = 0.8        # [-]        emissivity of air
+emSed     = 0.95*1       # [-]        emissivity of sediment
+stanton   = 0.001*1      # [-]        transfer coeff for sensible heat
+dalton    = 0.0014*1     # [-]        transfer coeff for latent heat
+dependencyT = FALSE
+densWater = 1024       # [kg/m3]    seawater density
+densSolid = 2500       # [kg/m3]    sediment dry density
+cpWater   = 3994       # [J/kg/dgC] specific heat capacity water
+cpSolid   = 700       # [J/kg/dgC] specific heat capacity solid (dry sediment)* 
+#518-907 
+#the higher, model value in winter will be higher, in summer will be lower
+#not as sensitive as tcsolid, 700-900 like the same
+#850 is too high, 700 will make the summer deep sediment fit good
+tcWater   = 0.6        # [W/m/dg]   thermal conductivity of water 
+tcSolid   = 7        # [W/m/dg]   thermal conductivity of solid* #1.68-19.21
+#the higher, model value will be lower in winter, higher in summer #6-7 is best, and it influences deeper layers the most)
+albedoWater = 0.05     # [-] part light reflected by water
+albedoSed = 0.1       # [-] part light reflected by sediment*(0.1-0.3, no big difference)
+#make it 0.3, radiation into sediment would be too low, modeled T would be too low
+kdWater   = 1        # [/m] light attenuation coefficient water (1-25/m in RT13)
+#from 1 to 25, no difference at all?
+kdSed     = 1000      # [/m] light attenuation coefficient (bulk) sediment(no difference from 1000 to 5000)
+#make it 10000, the effect is same with increasing albedoSed, winter overshooting is still there, but summer is too low
+
+# name=c("Mineral", "Density", "Thermal conductivity", "Thermal diffusivity", "Specific heat",  "Heat capacity"),
+#  unit=c("-", "1000 kg/m3", "(W/m/K)", "(10-6 m2/s)", "(1000 J/kg/K)", "(10^6 J/m3/K)"))
+#c("Quartz",     2.648, "a",  7.69, "b", 3.92, "i", 0.741, "c", 1.96, "i"),
+#c("Orthoclase", 2.570, "a",  2.32, "b", 1.28, "i", 0.707, "c", 1.82, "i"),
+#c("Albite",     2.620, "a",  2.14, "b", 1.05, "i", 0.776, "c", 2.03, "i"),
+#c("Anorthite",  2.760, "a",  1.68, "b", 0.817,"i", 0.745, "c", 2.06, "i"),
+#c("Calcite",    2.710, "a",  3.59, "b", 1.62, "i", 0.820, "c", 2.22, "i"),
+#c("Muscovite",  2.831, "a",  2.32, "b", 1.03, "f", 0.796, "i", 2.25, "i"),
+#c("Illite",     2.660, "a",  1.85, "d", 0.861,"i", 0.808, "e", 2.15, "i"),
+#c("Smectite (montmorillonite)",2.608,"a",1.88,"d", 0.907, "i", 0.795, "e",2.07,"i"),
+#c("Chlorite",   2.800, "a",  5.15, "b", 2.25, "f", 0.818, "i", 2.29, "i"),
+#c("Pyrite",     5.011, "a", 19.21, "b", 7.40, "i", 0.518, "g", 2.60, "i"),
+#c("Seawater",   1.025, "h", 0.596, "h",0.146, "h", 3.993, "h", 4.093, "i")
+```
+
+#### Output hourly
+
+```{r}
+find_time_comparison_function <- function(forcing_list) {
+  # Initialize variables to store the latest start time and earliest end time
+  latest_start_time <- -Inf
+  earliest_end_time <- Inf
+  latest_start_function <- NULL
+  earliest_end_function <- NULL
+  
+  # Loop over the list of functions and compare start and end times
+  for (function_name in names(forcing_list)) {
+    df <- forcing_list[[function_name]]
+    
+    # Get the first and last value of the "Second" column, first column
+    first_second <- min(df[,1])
+    last_second <- max(df[,1])
+    
+    # Check if this function starts later than the current latest start time
+    if (first_second > latest_start_time) {
+      latest_start_time <- first_second
+      latest_start_function <- function_name
+    }
+    
+    # Check if this function ends earlier than the current earliest end time
+    if (last_second < earliest_end_time) {
+      earliest_end_time <- last_second
+      earliest_end_function <- function_name
+    }
+  }
+  
+  # Return the result as a named list
+  list(
+    LatestStartFunction = latest_start_function,
+    FirstSecond = latest_start_time,
+    EarliestEndFunction = earliest_end_function,
+    LastSecond = earliest_end_time
+  )
+}
+
+
+```
+
+```{r}
+
+# Example usage with the forcing functions list
+forcing_functions <- list(
+  fPressure = fPair_WaS.wad,
+  fAirTemperature = fTair_WaS.wad,
+  fWaterHeight = fHeight_A_Den.wad,
+  fWaterTemp = fTwater_A.wad,
+  fAirHumidity = fHumidity_WaS.wad,
+  fSolarRadiation = fRad_WaS.wad,
+  fWindSpeed = fWind_WaS.wad,
+  fCloudiness = fCloud_WaS.wad
+)
+
+find_time_comparison_function(forcing_functions)
+
+
+```
+so we should start from 7200 seconds to 1208700 seconds
+
+```{r}
+# --- Convert each forcing .wad object to numeric double matrix (in place) ---
+
+# Helper: convert data.frame to numeric matrix with 2 columns (time, value)
+to_forcing_matrix <- function(df) {
+  stopifnot(ncol(df) >= 2)
+  m <- cbind(
+    as.numeric(df[[1]]),
+    as.numeric(df[[2]])
+  )
+  storage.mode(m) <- "double"
+  m
+}
+
+# List all forcing variable names you want to process
+forcing_names <- c(
+  "fPair_WaS.wad",
+  "fTair_WaS.wad",
+  "fHeight_A_Den.wad",
+  "fTwater_A.wad",
+  "fHumidity_WaS.wad",
+  "fRad_WaS.wad",
+  "fWind_WaS.wad",
+  "fCloud_WaS.wad"
+)
+
+# Loop through and overwrite each variable in the global environment
+for (nm in forcing_names) {
+  if (exists(nm, envir = .GlobalEnv)) {
+    obj <- get(nm, envir = .GlobalEnv)
+    if (is.data.frame(obj)) {
+      assign(nm, to_forcing_matrix(obj), envir = .GlobalEnv)
+      message("✅ Converted to double matrix: ", nm)
+    } else {
+      message("⚠️ Skipped (not a data.frame): ", nm)
+    }
+  } else {
+    message("⚠️ Object not found: ", nm)
+  }
+}
+
+# ✅ After this, each e.g. fTwater_A.wad, fRad_WaS.wad, etc. is now:
+# num [1:..., 1:2]  (double matrix)
+# ready for:  forcings = list(fWaterTemp = fTwater_A.wad, ...)
+
+```
+
+```{r}
+times  <- seq(from=7200, to=1208700, by=3600) 
+
+#use A water H
+# Tout.wad_A_A <- sedTemp1D(length.z=length.z, dz.1=dz.1,
+#                            Temp.ini=20,      Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z), times=times, porosity=porfun,
+#                dependencyT = dependencyT,cpSolid=cpSolid,
+#                tcSolid=tcSolid,
+#                emAir = emAir,
+#                emSed = emSed,
+#                dalton = dalton,
+#                stanton = stanton,
+#                albedoSed=albedoSed,
+#                kdWater = kdWater,
+#                albedoWater = albedoWater,
+#                fPressure=fPair_WaS.wad,
+#                fAirTemperature=fTair_WaS.wad, 
+#                fWaterHeight=fHeight_A_Den.wad,
+#                fWaterTemp=fTwater_A.wad, 
+#                fAirHumidity=fHumidity_WaS.wad
+#                fSolarRadiation=fRad_WaS.wad, 
+#                fWindSpeed=fWind_WaS.wad, 
+#                fCloudiness = fCloud_WaS.wad,sedpos=c(0, 0.03, 0.15))
+
+Tout.wad_A_A <- TempSED_run1D(z_max=length.z, dz_1=dz.1,
+                           T_ini=20,      Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z), times=times, porosity=porfun,
+               dependency_on_T = dependencyT,
+               parms = list(cp_solid=cpSolid,
+                            tc_solid =tcSolid,
+                            em_air = emAir, 
+                            dalton = dalton,
+                            stanton = stanton,
+                            albedo_sediment =albedoSed,
+                            kd_water = kdWater,
+                            albedo_water = albedoWater),
+               f_Pressure=fPair_WaS.wad,
+               f_Airtemperature=fTair_WaS.wad, 
+               f_Waterheight=fHeight_A_Den.wad,
+               f_Watertemperature=fTwater_A.wad, 
+               f_Qrel=fHumidity_WaS.wad,
+               f_Solarradiation=fRad_WaS.wad, 
+               f_Windspeed=fWind_WaS.wad, 
+               f_Cloudiness = fCloud_WaS.wad,sedpos=c(0, 0.03, 0.15))
+```
+
+#### A function to show 10cm band of model data fitting
+
+
+```{r}
+ModelBandDataPlot <- function(out, Tsed="Tsed_0.05", Tsed_up="Tsed_0.02", Tsed_down="Tsed_0.08", 
+                              Obsdat=Obsdat_ZK1.1, Date.from="2021-11-01", Date.to="2022-11-01",
+                              data.type="l", title="depth=0.05m", right.ylim_water=c(0, 100), right.ylim_radiation=c(0, 100), cex.text=1.7, cex.legend=0.8, cex.main=1,
+                              offset = 0, ...) {
+  
+  # Define full time range (xlim) as one year
+  xlim <- as.POSIXct(c(Date.from, Date.to), origin="1970-01-01")
+  # the data (Sediment Temperature on the left Y-axis)
+  idat <- which(Obsdat$Time >= Date.from & Obsdat$Time <= Date.to)
+  plot(Obsdat$Time[idat], Obsdat$Temperature[idat], 
+       type=data.type, lwd=2, col="red", xlab="", ylab="Sediment temperature (°C)", 
+       main=title, cex.main=cex.main, xlim=xlim, las=1, ...)
+  
+  # the model output
+  origin <- "2018-08-07 00:00:00"
+  DT.times <- as.POSIXct(out[,"time"], origin = origin)
+  # Apply time offset (in hours): when offset = 2, subtract 2 hours from model time
+  DT.times <- DT.times - as.difftime(offset, units = "hours")
+  
+  ii <- which(DT.times >= Date.from & DT.times <= Date.to)
+  lines(DT.times[ii], out[ii, Tsed])
+  xx <- c(DT.times[ii], rev(DT.times[ii]))
+  yy <- c(out[ii, Tsed_up], rev(out[ii, Tsed_down]))
+  polygon(xx, yy, col = alpha.col("lightgrey", alpha=1), border = NA)
+  
+  # Legend for temperature data and model
+  legend("topleft", legend=c("Data", "Model"), col=c("red", "black"), lty=1, lwd=2:1, cex=cex.legend)
+  
+  ## Solar Radiation as a polygon (scaled by dividing by scale.factor)
+  par(new=TRUE)
+  plot(DT.times[ii], out[ii, "Solarradiation"], type="n", axes=FALSE, xlab="", ylab="", ylim=right.ylim_radiation, xlim=xlim)
+  polygon(c(DT.times[ii[1]], DT.times[ii], DT.times[ii[length(ii)]], DT.times[ii[1]]),
+          c(0, out[ii, "Solarradiation"], 0, 0), border=NA, col=alpha.col("yellow", alpha=1))
+  
+  # Add the first y-axis on the right
+  axis(4, col = "#DAA520", col.axis = "#DAA520", las = 1)  # las = 1 for horizontal tick labels
+  mtext("Solar radiation (W/m²)", side = 4, line = 3, col = "#DAA520", cex=cex.text)  # Add label for the first y-axis
+  
+  ## Water Height as a polygon (use a different color)
+  par(new=TRUE)
+  plot(DT.times[ii], out[ii, "Waterheight"], type="n", axes=FALSE, xlab="", ylab="", ylim=right.ylim_water, xlim=xlim)
+  polygon(c(DT.times[ii[1]], DT.times[ii], DT.times[ii[length(ii)]], DT.times[ii[1]]),
+          c(0, out[ii, "Waterheight"], 0, 0), border=NA, col=alpha.col("blue", alpha=1))
+  
+  # Add the secondary y-axis on the right
+  axis(4, col = "blue", col.axis = "blue", line = 5, las=1)  # Adjust line for separation
+  mtext("Water height (m)", side = 4, line = 7, col = "blue", cex=cex.text)  # Add label for secondary y-axis
+
+  ## Re-plot the sediment temperature data (as it's been overwritten by the other plots)
+  par(new=TRUE)
+  plot(Obsdat$Time[idat], Obsdat$Temperature[idat], 
+       type=data.type, lwd=2, col="red", xlab="", ylab="Sediment temperature (°C)", 
+       main=title, cex.main=cex.main, xlim=xlim, las=1, ...)
+  lines(DT.times[ii], out[ii, Tsed], lwd=2)
+}
+
+
+```
+
+
+#### Station A: Plot model-data fit
+
+```{r,fig.width=10, fig.height=5}
+par(mfrow=c(1,1), mar=c(4,5,4,9))
+#3cm
+ModelBandDataPlot(Tout.wad_A_A, Tsed="Tsed_0.03", "Tsed_0.03", "Tsed_0.03", Obsdat_A_3cm, "2018-08-08", "2018-08-20", ylim=c(10, 30), title = "A_3cm", right.ylim_water =c(0, 5), right.ylim_radiation =c(0, 1000),cex.legend=0.8,cex.text = 1,cex.main=1, offset = 2)
+#15cm
+ModelBandDataPlot(Tout.wad_A_A, Tsed="Tsed_0.15", "Tsed_0.15", "Tsed_0.15", Obsdat_A_15cm, "2018-08-08", "2018-08-20", ylim=c(10, 30), title = "A_15cm", right.ylim_water =c(0, 5), right.ylim_radiation =c(0, 1000),cex.legend=0.8,cex.text = 1,cex.main=1, offset = 2)
+```
+
+
+### 3.3.2 B
+
+#### Station B Parameters
+
+The initial guess of parameters are from sandy sediment (Dortsman) fitting of Ricky's data
+
+```{r}
+porfun <- function(x) return(0.45 + (1-0.45) * exp(-x*300))
+
+length.z <- 10
+dz.1     <- 1e-4
+
+Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z)
+por      <- setup.prop.1D(func=porfun, grid=Grid)
+
+plot(por, grid=Grid, xyswap=TRUE, xlim=c(0,1), ylim=c(0.1,0), xlab="Porosity", ylab="Depth(m)"); abline(h=0)
+```
+
+
+```{r}
+# parameters
+emAir     = 0.8        # [-]        emissivity of air
+emSed     = 0.95       # [-]        emissivity of sediment
+stanton   = 0.001      # [-]        transfer coeff for sensible heat
+dalton    = 0.0014     # [-]        transfer coeff for latent heat
+dependencyT = FALSE
+densWater = 1024       # [kg/m3]    seawater density
+densSolid = 2500       # [kg/m3]    sediment dry density
+cpWater   = 3994       # [J/kg/dgC] specific heat capacity water
+cpSolid   = 900       # [J/kg/dgC] specific heat capacity solid (dry sediment)* 
+#518-907 (741)(700 is still fine, 1000 is even better)
+tcWater   = 0.6        # [W/m/dg]   thermal conductivity of water 
+tcSolid   = 2        # [W/m/dg]   thermal conductivity of solid* #1.68-19.21 (7.69)
+#2.5 is too high, 1.5 is too low, 2 is best 
+albedoWater = 0.05     # [-] part light refracted by water
+albedoSed = 0.15       # [-] part light refracted by sediment* #0.15-0.4 for DTS from experiment
+#0.3 will make some value too low, 0.2 also, 0.15 seems like best
+kdWater   = 1        # [/m] light attenuation coefficient water (1-25/m in RT13)
+kdSed     = 1000       # [/m] light attenuation coefficient (bulk) sediment
+
+#default values:   emAir = 0.8,  emSed = 0.95, stanton = 0.001, dalton = 0.0014,dependencyT = FALSE, densWater = 1024, densSolid = 2500, cpWater = 3994, cpSolid = 1000, tcWater = 0.6, tcSolid = 2.1, albedoWater = 0.05, albedoSed = 0.15, kdWater = 1.0, kdSed = 1000
+
+
+# name=c("Mineral", "Density", "Thermal conductivity", "Thermal diffusivity", "Specific heat",  "Heat capacity"),
+#  unit=c("-", "1000 kg/m3", "(W/m/K)", "(10-6 m2/s)", "(1000 J/kg/K)", "(10^6 J/m3/K)"))
+#c("Quartz",     2.648, "a",  7.69, "b", 3.92, "i", 0.741, "c", 1.96, "i"),
+#c("Orthoclase", 2.570, "a",  2.32, "b", 1.28, "i", 0.707, "c", 1.82, "i"),
+#c("Albite",     2.620, "a",  2.14, "b", 1.05, "i", 0.776, "c", 2.03, "i"),
+#c("Anorthite",  2.760, "a",  1.68, "b", 0.817,"i", 0.745, "c", 2.06, "i"),
+#c("Calcite",    2.710, "a",  3.59, "b", 1.62, "i", 0.820, "c", 2.22, "i"),
+#c("Muscovite",  2.831, "a",  2.32, "b", 1.03, "f", 0.796, "i", 2.25, "i"),
+#c("Illite",     2.660, "a",  1.85, "d", 0.861,"i", 0.808, "e", 2.15, "i"),
+#c("Smectite (montmorillonite)",2.608,"a",1.88,"d", 0.907, "i", 0.795, "e",2.07,"i"),
+#c("Chlorite",   2.800, "a",  5.15, "b", 2.25, "f", 0.818, "i", 2.29, "i"),
+#c("Pyrite",     5.011, "a", 19.21, "b", 7.40, "i", 0.518, "g", 2.60, "i"),
+#c("Seawater",   1.025, "h", 0.596, "h",0.146, "h", 3.993, "h", 4.093, "i")
+```
+
+#### Output hourly
+
+
+```{r}
+
+# Example usage with the forcing functions list
+forcing_functions <- list(
+  f_Pressure = fPair_WaS.wad,
+  f_Airtemperature = fTair_WaS.wad,
+  f_Waterheight = fHeight_B_Den.wad,
+  f_Watertemperature = fTwater_B.wad,
+  f_Qrel = fHumidity_WaS.wad,
+  f_Solarradiation = fRad_WaS.wad,
+  f_Windspeed = fWind_WaS.wad,
+  f_Cloudiness = fCloud_WaS.wad
+)
+
+result <- find_time_comparison_function(forcing_functions)
+
+result
+
+
+```
+
+
+```{r}
+# --- Convert each forcing .wad object to numeric double matrix (in place) ---
+
+# Helper: convert data.frame to numeric matrix with 2 columns (time, value)
+to_forcing_matrix <- function(df) {
+  stopifnot(ncol(df) >= 2)
+  m <- cbind(
+    as.numeric(df[[1]]),
+    as.numeric(df[[2]])
+  )
+  storage.mode(m) <- "double"
+  m
+}
+
+# List all forcing variable names you want to process
+forcing_names <- c(
+  "fPair_WaS.wad",
+  "fTair_WaS.wad",
+  "fHeight_B_Den.wad",
+  "fTwater_B.wad",
+  "fHumidity_WaS.wad",
+  "fRad_WaS.wad",
+  "fWind_WaS.wad",
+  "fCloud_WaS.wad"
+)
+
+# Loop through and overwrite each variable in the global environment
+for (nm in forcing_names) {
+  if (exists(nm, envir = .GlobalEnv)) {
+    obj <- get(nm, envir = .GlobalEnv)
+    if (is.data.frame(obj)) {
+      assign(nm, to_forcing_matrix(obj), envir = .GlobalEnv)
+      message("✅ Converted to double matrix: ", nm)
+    } else {
+      message("⚠️ Skipped (not a data.frame): ", nm)
+    }
+  } else {
+    message("⚠️ Object not found: ", nm)
+  }
+}
+
+# ✅ After this, each e.g. fTwater_A.wad, fRad_WaS.wad, etc. is now:
+# num [1:..., 1:2]  (double matrix)
+# ready for:  forcings = list(fWaterTemp = fTwater_A.wad, ...)
+
+```
+
+```{r}
+times  <- seq(from=7200, to=1208700, by=3600) 
+
+#
+Tout.wad_B_B <- TempSED_run1D(z_max=length.z, dz_1=dz.1,
+                              T_ini=20,      Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z), times=times, porosity=porfun,
+                              dependency_on_T = dependencyT,
+                              parms = list(cp_solid=cpSolid,
+                                           tc_solid =tcSolid,
+                                           em_air = emAir, 
+                                           dalton = dalton,
+                                           stanton = stanton,
+                                           albedo_sediment =albedoSed,
+                                           kd_water = kdWater,
+                                           albedo_water = albedoWater),
+                              f_Pressure=fPair_WaS.wad,
+                              f_Airtemperature=fTair_WaS.wad, 
+                              f_Waterheight=fHeight_A_Den.wad,
+                              f_Watertemperature=fTwater_A.wad, 
+                              f_Qrel=fHumidity_WaS.wad,
+                              f_Solarradiation=fRad_WaS.wad, 
+                              f_Windspeed=fWind_WaS.wad, 
+                              f_Cloudiness = fCloud_WaS.wad,sedpos=c(0, 0.03, 0.15))
+
+```
+
+
+
+#### B - Plot model-data fit
+
+```{r,fig.width=10, fig.height=5}
+par(mfrow=c(1,1), mar=c(4,5,4,9))
+#3cm
+ModelBandDataPlot(Tout.wad_B_B, Tsed="Tsed_0.03", "Tsed_0.03", "Tsed_0.03", Obsdat_B_3cm, "2018-08-08", "2018-08-20", ylim=c(10, 30), title = "B_3cm", right.ylim_water =c(0, 5), right.ylim_radiation =c(0, 1000),cex.legend=0.8,cex.text = 1,cex.main=1, offset = 2)
+#15cm
+ModelBandDataPlot(Tout.wad_B_B, Tsed="Tsed_0.15", "Tsed_0.15", "Tsed_0.15", Obsdat_B_15cm, "2018-08-08", "2018-08-20", ylim=c(10, 30), title = "B_15cm", right.ylim_water =c(0, 5), right.ylim_radiation =c(0, 1000),cex.legend=0.8,cex.text = 1,cex.main=1, offset = 2)
+
+```
+
+
+
+
+
+
+
+
+
+
+### 3.3.3 D
+
+#### Parameters
+
+The initial guess of parameters are from sandy sediment (Dortsman) fitting of Ricky's data
+
+```{r}
+porfun <- function(x) return(0.45 + (1-0.45) * exp(-x*300))
+
+length.z <- 10
+dz.1     <- 1e-4
+
+Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z)
+por      <- setup.prop.1D(func=porfun, grid=Grid)
+
+plot(por, grid=Grid, xyswap=TRUE, xlim=c(0,1), ylim=c(0.1,0), xlab="Porosity", ylab="Depth(m)"); abline(h=0)
+```
+
+
+
+```{r}
+# parameters
+emAir     = 0.8        # [-]        emissivity of air
+emSed     = 0.95       # [-]        emissivity of sediment
+stanton   = 0.001      # [-]        transfer coeff for sensible heat
+dalton    = 0.0014     # [-]        transfer coeff for latent heat
+dependencyT = FALSE
+densWater = 1024       # [kg/m3]    seawater density
+densSolid = 2500       # [kg/m3]    sediment dry density
+cpWater   = 3994       # [J/kg/dgC] specific heat capacity water
+cpSolid   = 900       # [J/kg/dgC] specific heat capacity solid (dry sediment)* 
+#518-907 (741)(700 is still fine, 1000 is even better)
+tcWater   = 0.6        # [W/m/dg]   thermal conductivity of water 
+tcSolid   = 2        # [W/m/dg]   thermal conductivity of solid* #1.68-19.21 (7.69)
+#2.5 is too high, 1.5 is too low, 2 is best 
+albedoWater = 0.05     # [-] part light refracted by water
+albedoSed = 0.15       # [-] part light refracted by sediment* #0.15-0.4 for DTS from experiment
+#0.3 will make some value too low, 0.2 also, 0.15 seems like best
+kdWater   = 1        # [/m] light attenuation coefficient water (1-25/m in RT13)
+kdSed     = 1000       # [/m] light attenuation coefficient (bulk) sediment
+
+#default values:   emAir = 0.8,  emSed = 0.95, stanton = 0.001, dalton = 0.0014,dependencyT = FALSE, densWater = 1024, densSolid = 2500, cpWater = 3994, cpSolid = 1000, tcWater = 0.6, tcSolid = 2.1, albedoWater = 0.05, albedoSed = 0.15, kdWater = 1.0, kdSed = 1000
+
+
+# name=c("Mineral", "Density", "Thermal conductivity", "Thermal diffusivity", "Specific heat",  "Heat capacity"),
+#  unit=c("-", "1000 kg/m3", "(W/m/K)", "(10-6 m2/s)", "(1000 J/kg/K)", "(10^6 J/m3/K)"))
+#c("Quartz",     2.648, "a",  7.69, "b", 3.92, "i", 0.741, "c", 1.96, "i"),
+#c("Orthoclase", 2.570, "a",  2.32, "b", 1.28, "i", 0.707, "c", 1.82, "i"),
+#c("Albite",     2.620, "a",  2.14, "b", 1.05, "i", 0.776, "c", 2.03, "i"),
+#c("Anorthite",  2.760, "a",  1.68, "b", 0.817,"i", 0.745, "c", 2.06, "i"),
+#c("Calcite",    2.710, "a",  3.59, "b", 1.62, "i", 0.820, "c", 2.22, "i"),
+#c("Muscovite",  2.831, "a",  2.32, "b", 1.03, "f", 0.796, "i", 2.25, "i"),
+#c("Illite",     2.660, "a",  1.85, "d", 0.861,"i", 0.808, "e", 2.15, "i"),
+#c("Smectite (montmorillonite)",2.608,"a",1.88,"d", 0.907, "i", 0.795, "e",2.07,"i"),
+#c("Chlorite",   2.800, "a",  5.15, "b", 2.25, "f", 0.818, "i", 2.29, "i"),
+#c("Pyrite",     5.011, "a", 19.21, "b", 7.40, "i", 0.518, "g", 2.60, "i"),
+#c("Seawater",   1.025, "h", 0.596, "h",0.146, "h", 3.993, "h", 4.093, "i")
+```
+
+#### Output hourly
+
+
+```{r}
+
+# Example usage with the forcing functions list
+forcing_functions <- list(
+  fPressure = fPair_WaS.wad,
+  fAirTemperature = fTair_WaS.wad,
+  fWaterHeight = fHeight_D_Den.wad,
+  fWaterTemp = fTwater_D.wad,
+  fAirHumidity = fHumidity_WaS.wad,
+  fSolarRadiation = fRad_WaS.wad,
+  fWindSpeed = fWind_WaS.wad,
+  fCloudiness = fCloud_WaS.wad
+)
+
+result <- find_time_comparison_function(forcing_functions)
+
+result
+```
+
+```{r}
+# --- Convert each forcing .wad object to numeric double matrix (in place) ---
+
+# Helper: convert data.frame to numeric matrix with 2 columns (time, value)
+to_forcing_matrix <- function(df) {
+  stopifnot(ncol(df) >= 2)
+  m <- cbind(
+    as.numeric(df[[1]]),
+    as.numeric(df[[2]])
+  )
+  storage.mode(m) <- "double"
+  m
+}
+
+# List all forcing variable names you want to process
+forcing_names <- c(
+  "fPair_WaS.wad",
+  "fTair_WaS.wad",
+  "fHeight_D_Den.wad",
+  "fTwater_D.wad",
+  "fHumidity_WaS.wad",
+  "fRad_WaS.wad",
+  "fWind_WaS.wad",
+  "fCloud_WaS.wad"
+)
+
+# Loop through and overwrite each variable in the global environment
+for (nm in forcing_names) {
+  if (exists(nm, envir = .GlobalEnv)) {
+    obj <- get(nm, envir = .GlobalEnv)
+    if (is.data.frame(obj)) {
+      assign(nm, to_forcing_matrix(obj), envir = .GlobalEnv)
+      message("✅ Converted to double matrix: ", nm)
+    } else {
+      message("⚠️ Skipped (not a data.frame): ", nm)
+    }
+  } else {
+    message("⚠️ Object not found: ", nm)
+  }
+}
+
+# ✅ After this, each e.g. fTwater_A.wad, fRad_WaS.wad, etc. is now:
+# num [1:..., 1:2]  (double matrix)
+# ready for:  forcings = list(fWaterTemp = fTwater_A.wad, ...)
+
+```
+
+```{r}
+times  <- seq(from=7200, to=1208700, by=3600) 
+
+#
+Tout.wad_D_D <- TempSED_run1D(z_max=length.z, dz_1=dz.1,
+                              T_ini=20,      Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z), times=times, porosity=porfun,
+                              dependency_on_T = dependencyT,
+                              parms = list(cp_solid=cpSolid,
+                                           tc_solid =tcSolid,
+                                           em_air = emAir, 
+                                           dalton = dalton,
+                                           stanton = stanton,
+                                           albedo_sediment =albedoSed,
+                                           kd_water = kdWater,
+                                           albedo_water = albedoWater),
+                              f_Pressure=fPair_WaS.wad,
+                              f_Airtemperature=fTair_WaS.wad, 
+                              f_Waterheight=fHeight_A_Den.wad,
+                              f_Watertemperature=fTwater_A.wad, 
+                              f_Qrel=fHumidity_WaS.wad,
+                              f_Solarradiation=fRad_WaS.wad, 
+                              f_Windspeed=fWind_WaS.wad, 
+                              f_Cloudiness = fCloud_WaS.wad,sedpos=c(0, 0.03, 0.15))
+
+
+```
+
+
+
+#### Plot model-data fit
+
+```{r,fig.width=10, fig.height=5}
+par(mfrow=c(1,1), mar=c(4,5,4,9))
+#3cm
+ModelBandDataPlot(Tout.wad_D_D, Tsed="Tsed_0.03", "Tsed_0.03", "Tsed_0.03", Obsdat_D_3cm, "2018-08-08", "2018-08-20", ylim=c(10, 30), title = "D_3cm", right.ylim_water =c(0, 5), right.ylim_radiation =c(0, 1000),cex.legend=0.8,cex.text = 1,cex.main=1, offset = 2)
+#15cm
+ModelBandDataPlot(Tout.wad_D_D, Tsed="Tsed_0.15", "Tsed_0.15", "Tsed_0.15", Obsdat_D_15cm, "2018-08-08", "2018-08-20", ylim=c(10, 30), title = "D_15cm", right.ylim_water =c(0, 5), right.ylim_radiation =c(0, 1000),cex.legend=0.8,cex.text = 1,cex.main=1, offset = 2)
+
+```
+
+
+### 3.3.4 plot together
+
+#### porosity graph A, B & D
+```{r}
+porfun_A <- function(x) return(0.45 + (1-0.45) * exp(-x*50))
+
+length.z <- 10
+dz.1     <- 1e-4
+
+Grid_A = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z)
+por_A      <- setup.prop.1D(func=porfun_A, grid=Grid)
+
+plot(por_A, grid=Grid_A, xyswap=TRUE, xlim=c(0,1), ylim=c(0.1,0), xlab="Porosity", ylab="Depth(m)", t="l", col = 1); abline(h=0, lty=2)
+
+
+porfun_B <- function(x) return(0.45 + (1-0.45) * exp(-x*300))
+
+length.z <- 10
+dz.1     <- 1e-4
+
+Grid_B = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z)
+por_B      <- setup.prop.1D(func=porfun_B, grid=Grid_B)
+
+par(new=T)
+plot(por_B, grid=Grid_B, 
+     xyswap=TRUE, xlim=c(0,1), ylim=c(0.1,0), col=2, t="l", xlab="", ylab="")
+
+legend("bottomleft", legend=c("Station A", "Station B & D"), lty=1, col = c(1,2))
+
+```
+
+#### model-data fit
+```{r,fig.width=10, fig.height=6}
+par(mfrow=c(3,2), mar=c(4,4,4,8))
+#A
+#3cm
+ModelBandDataPlot(Tout.wad_A_A, Tsed="Tsed_0.03", "Tsed_0.03", "Tsed_0.03", Obsdat_A_3cm, "2018-08-08", "2018-08-20", ylim=c(10, 30), title = "A_3cm", right.ylim_water =c(0, 5), right.ylim_radiation =c(0, 1000),cex.legend=0.8,cex.text = 1,cex.main=1.2, offset = 2)
+#15cm
+ModelBandDataPlot(Tout.wad_A_A, Tsed="Tsed_0.15", "Tsed_0.15", "Tsed_0.15", Obsdat_A_15cm, "2018-08-08", "2018-08-20", ylim=c(10, 30), title = "A_15cm", right.ylim_water =c(0, 5), right.ylim_radiation =c(0, 1000),cex.legend=0.8,cex.text = 1,cex.main=1.2, offset = 2)
+
+#B
+#3cm
+ModelBandDataPlot(Tout.wad_B_B, Tsed="Tsed_0.03", "Tsed_0.03", "Tsed_0.03", Obsdat_B_3cm, "2018-08-08", "2018-08-20", ylim=c(10, 30), title = "B_3cm", right.ylim_water =c(0, 5), right.ylim_radiation =c(0, 1000),cex.legend=0.8,cex.text = 1,cex.main=1.2, offset = 2)
+#15cm
+ModelBandDataPlot(Tout.wad_B_B, Tsed="Tsed_0.15", "Tsed_0.15", "Tsed_0.15", Obsdat_B_15cm, "2018-08-08", "2018-08-20", ylim=c(10, 30), title = "B_15cm", right.ylim_water =c(0, 5), right.ylim_radiation =c(0, 1000),cex.legend=0.8,cex.text = 1,cex.main=1.2, offset = 2)
+
+#D
+#3cm
+ModelBandDataPlot(Tout.wad_D_D, Tsed="Tsed_0.03", "Tsed_0.03", "Tsed_0.03", Obsdat_D_3cm, "2018-08-08", "2018-08-20", ylim=c(10, 30), title = "D_3cm", right.ylim_water =c(0, 5), right.ylim_radiation =c(0, 1000),cex.legend=0.8,cex.text = 1,cex.main=1.2, offset = 2)
+#15cm
+ModelBandDataPlot(Tout.wad_D_D, Tsed="Tsed_0.15", "Tsed_0.15", "Tsed_0.15", Obsdat_D_15cm, "2018-08-08", "2018-08-20", ylim=c(10, 30), title = "D_15cm", right.ylim_water =c(0, 5), right.ylim_radiation =c(0, 1000),cex.legend=0.8,cex.text = 1,cex.main=1.2, offset = 2)
+```
+
+
+# 4. Scenario analysis
+## 4.1 Tide-solar offset (-6h to + 6h)
