@@ -1,0 +1,1205 @@
+---
+title: "Sediment temperature model scenarios for Wadden Sea bivalve habitats"
+author: ""
+date: ""
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  fig.align = 'center',  # Center all figures
+  tidy.opts = list(width.cutoff = 60),
+  tidy = TRUE
+)
+```
+
+
+```{r message=FALSE}
+# devtools::install_github("dynamic-R/TempSED", depend=TRUE, build.vignettes=TRUE)
+# require(sedTemp)
+require(TempSED)
+require(deSolve)
+require(rootSolve)
+require(ReacTran) # for setup.grid.1D function
+require(readxl) # for reading sediment temperature sensor xlsx data
+require(dplyr)
+require(stringr)
+require(ncdf4) #for dealing with netCDF data (metero data)
+SL <- Sys.getlocale("LC_TIME")
+Sys.setlocale("LC_TIME", "C")
+
+require(plot3D)
+```
+
+# 2. Save all the data so we don't have to run data processing again
+```{r}
+#sed T observation
+# save(Mok_data, file = "../data/DataQing/Mok_data.rda")
+# your working directory
+wd <- "C:\\Users\\qzhan\\OneDrive - NIOZ\\Attachments\\01_LTER-LIFE\\04_Bivalve\\Modelling\\Heatwave_bivalve"
+load(paste0(wd, "/Data/Mok_data.rda"))
+
+#weather forcings
+# save(ForcingsDeKooyAirport, file = "../data/DataQing/ForcingsDeKooyAirport.rda")
+load(paste0(wd, "/Data/ForcingsDeKooyAirport.rda"))
+
+#water forcings from RWS
+# save(WaterForcingsRWSWaddenSea, file = "../data/DataQing/WaterForcingsRWSWaddenSea.rda")
+load(paste0(wd, "/Data/WaterForcingsRWSWaddenSea.rda"))
+```
+
+# 3.Model-data fit
+
+## 3.1 Create forcing functions
+
+### 3.1.1 Meteo functions
+```{r}
+# Forcing functions
+fWind_WaS.wad      <-   ForcingsDeKooyAirport[,c("Second", "windSpeed")]
+fRad_WaS.wad       <-   ForcingsDeKooyAirport[,c("Second", "radiation")]
+fTair_WaS.wad      <-   ForcingsDeKooyAirport[,c("Second", "airTemperature")]
+fPair_WaS.wad      <-   ForcingsDeKooyAirport[,c("Second", "airPressure")]
+fHumidity_WaS.wad  <-   ForcingsDeKooyAirport[,c("Second", "airHumidity")]
+fCloud_WaS.wad     <-   ForcingsDeKooyAirport[,c("Second", "cloudCover")]
+```
+
+### 3.1.2 Water level functions
+```{r}
+# Set the origin date-time
+origin <- as.POSIXct("2018-08-07 00:00:00", tz = "CET")
+
+# Function to process the water level data for Vvk or Balgzand and return only the required columns
+process_water_level <- function(data, station_name, depth_offset) {
+  # Convert Time to seconds
+  data$Second <- as.double(julian(data$Time, origin = origin) * 86400)
+  
+  # Adjust water level values based on the station (Vvk or Balgzand)
+  data$H.m <- (data$NUMERIEKEWAARDE - depth_offset) / 100
+  
+  # Replace negative water level values with 0
+  data$H.m[data$H.m < 0] <- 0
+  
+  # Keep only the columns 'Second' and 'H.m'
+  data <- data[, c("Second", "H.m")]
+  
+  return(data)
+}
+
+# Process the data
+
+
+#2. use Den Helder, veersteiger water H
+# For A station
+fHeight_A_Den.wad <- process_water_level(WaterForcingsRWSWaddenSea$`Den Helder, veersteiger`$WaterLevel, "A", -9)
+
+# # For B station
+fHeight_B_Den.wad <- process_water_level(WaterForcingsRWSWaddenSea$`Den Helder, veersteiger`$WaterLevel, "B", -33)
+
+# # For D station
+# fHeight_D_Den.wad <- process_water_level(WaterForcingsRWSWaddenSea$`Den Helder, veersteiger`$WaterLevel, "D", -74)
+
+
+# View the processed data
+
+
+head(fHeight_A_Den.wad)
+head(fHeight_B_Den.wad)
+# head(fHeight_D_Den.wad)
+
+```
+
+### 3.1.3 Water T function
+```{r}
+# Function to process the water temperature data for "Monding Nieuwe Haven" and return only the required columns
+process_temperature_data <- function(data) {
+  # Convert Time to seconds
+  data$Second <- as.double(julian(data$Time, origin = origin) * 86400)
+  
+  data$Temperature <- data$NUMERIEKEWAARDE
+  
+  # Keep only the columns 'Second' and 'Temperature'
+  data <- data[, c("Second", "Temperature")]
+  
+  return(data)
+}
+
+# Process the data for 'Den Helder, veersteiger'
+fTwater_Den.wad <- process_temperature_data(WaterForcingsRWSWaddenSea$`Den Helder, veersteiger`$Temperature)
+
+# View the processed data
+head(fTwater_Den.wad)
+```
+
+
+
+
+```{r}
+
+# --- Generate in-memory fTwater_*.wad data frames from Mok_data ---
+generate_fTwater_data <- function(Mok_data) {
+  library(dplyr)
+  
+  stopifnot(all(c("Station", "Depth", "Second", "Temperature") %in% names(Mok_data)))
+  
+  # Normalize time to start at 0
+  Mok_data <- Mok_data %>%
+    mutate(Second = Second - min(Second, na.rm = TRUE))
+  
+  # Function to extract by station
+  extract_station <- function(station) {
+    Mok_data %>%
+      filter(Station == station, Depth == 2) %>%
+      arrange(Second) %>%
+      select(Second, Temperature)
+  }
+  
+  # Create each data frame
+  fTwater_A.wad <- extract_station("A")
+  fTwater_B.wad <- extract_station("B")
+  fTwater_D.wad <- extract_station("D")
+  
+  # Return all as a named list (and keep also as objects in global env)
+  assign("fTwater_A.wad", fTwater_A.wad, envir = .GlobalEnv)
+  assign("fTwater_B.wad", fTwater_B.wad, envir = .GlobalEnv)
+  assign("fTwater_D.wad", fTwater_D.wad, envir = .GlobalEnv)
+  
+  message("✅ Created in-memory data frames: fTwater_A.wad, fTwater_B.wad, fTwater_D.wad")
+  
+  invisible(list(A = fTwater_A.wad,
+                 B = fTwater_B.wad,
+                 D = fTwater_D.wad))
+}
+
+# ---- Example usage ----
+result <- generate_fTwater_data(Mok_data)
+
+# Access them directly:
+head(fTwater_A.wad)
+head(fTwater_B.wad)
+head(fTwater_D.wad)
+
+```
+
+
+## 3.2 Create observation data
+```{r}
+# Function to create the observation data from SedTempDataWaddenSea
+create_observation_data <- function(data, station_name, depth) {
+  # Filter the data by the given station and depth
+  station_data <- subset(data, Station == station_name & Depth == depth)
+  
+  # Create a new data frame with the 'Time' and 'Temperature' columns
+  obs_data <- data.frame(
+    Time = station_data$DateTime,         # Use DateTime as Time
+    Temperature = station_data$Temperature  # Use Temperature as Temperature
+  )
+  
+  # Return the resulting data frame
+  return(obs_data)
+}
+
+
+# Create Obsdat_Mokbai from SedTempDataWaddenSea
+Obsdat_A_3cm <- create_observation_data(Mok_data, "A", 3)
+Obsdat_A_15cm <- create_observation_data(Mok_data, "A", 15)
+
+# Create Obsdat_Mokbai from SedTempDataWaddenSea
+Obsdat_B_3cm <- create_observation_data(Mok_data, "B", 3)
+Obsdat_B_15cm <- create_observation_data(Mok_data, "B", 15)
+
+# Obsdat_D_3cm <- create_observation_data(Mok_data, "D", 3)
+# Obsdat_D_15cm <- create_observation_data(Mok_data, "D", 15)
+
+# View the first few rows of Obsdat_Vvk and Obsdat_Balgzand
+head(Obsdat_A_3cm)
+head(Obsdat_B_3cm)
+# head(Obsdat_D_3cm)
+
+head(Obsdat_A_15cm)
+head(Obsdat_B_15cm)
+# head(Obsdat_D_15cm)
+```
+
+### 3.3.1 Onshore station A
+
+#### Porosity Parameters
+
+The initial guess of parameters are from muddy sediment (Zandkreek) fitting of Ricky's data
+
+```{r}
+
+require(ReacTran)
+porfun <- function(x) return(0.45 + (1-0.45) * exp(-x*50))
+
+length.z <- 10
+dz.1     <- 1e-4
+
+Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z)
+por      <- setup.prop.1D(func=porfun, grid=Grid)
+
+plot(por, grid=Grid, xyswap=TRUE, xlim=c(0,1), ylim=c(0.1,0), xlab="Porosity", ylab="Depth(m)", t="l"); abline(h=0, lty=2)
+```
+
+Alternative: sandy sediment
+- Attenuation coefficient range between 50 and 300;
+- deep porosity 0.45 can also be changed
+- Surface porosity can be changed from 1 (assume there is always a thin water layer at surface) to 0.9
+```{r}
+require(ReacTran)
+porfun <- function(x) return(0.45 + (1-0.45) * exp(-x*300))
+
+length.z <- 10
+dz.1     <- 1e-4
+
+Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z)
+por      <- setup.prop.1D(func=porfun, grid=Grid)
+
+plot(por, grid=Grid, xyswap=TRUE, xlim=c(0,1), ylim=c(0.1,0), xlab="Porosity", ylab="Depth(m)", t="l"); abline(h=0, lty=2)
+```
+
+```{r}
+# parameters
+emAir     = 0.8        # [-]        emissivity of air
+emSed     = 0.95*1       # [-]        emissivity of sediment
+stanton   = 0.001*1      # [-]        transfer coeff for sensible heat
+dalton    = 0.0014*1     # [-]        transfer coeff for latent heat
+dependencyT = FALSE
+densWater = 1024       # [kg/m3]    seawater density
+densSolid = 2500       # [kg/m3]    sediment dry density
+cpWater   = 3994       # [J/kg/dgC] specific heat capacity water
+cpSolid   = 700       # [J/kg/dgC] specific heat capacity solid (dry sediment)* 
+#518-907 
+#the higher, model value in winter will be higher, in summer will be lower
+#not as sensitive as tcsolid, 700-900 like the same
+#850 is too high, 700 will make the summer deep sediment fit good
+tcWater   = 0.6        # [W/m/dg]   thermal conductivity of water 
+tcSolid   = 7        # [W/m/dg]   thermal conductivity of solid* #1.68-19.21
+#the higher, model value will be lower in winter, higher in summer #6-7 is best, and it influences deeper layers the most)
+albedoWater = 0.05     # [-] part light reflected by water
+albedoSed = 0.1       # [-] part light reflected by sediment*(0.1-0.3, no big difference)
+#make it 0.3, radiation into sediment would be too low, modeled T would be too low
+kdWater   = 1        # [/m] light attenuation coefficient water (1-25/m in RT13)
+#from 1 to 25, no difference at all?
+kdSed     = 1000      # [/m] light attenuation coefficient (bulk) sediment(no difference from 1000 to 5000)
+#make it 10000, the effect is same with increasing albedoSed, winter overshooting is still there, but summer is too low
+
+# name=c("Mineral", "Density", "Thermal conductivity", "Thermal diffusivity", "Specific heat",  "Heat capacity"),
+#  unit=c("-", "1000 kg/m3", "(W/m/K)", "(10-6 m2/s)", "(1000 J/kg/K)", "(10^6 J/m3/K)"))
+#c("Quartz",     2.648, "a",  7.69, "b", 3.92, "i", 0.741, "c", 1.96, "i"),
+#c("Orthoclase", 2.570, "a",  2.32, "b", 1.28, "i", 0.707, "c", 1.82, "i"),
+#c("Albite",     2.620, "a",  2.14, "b", 1.05, "i", 0.776, "c", 2.03, "i"),
+#c("Anorthite",  2.760, "a",  1.68, "b", 0.817,"i", 0.745, "c", 2.06, "i"),
+#c("Calcite",    2.710, "a",  3.59, "b", 1.62, "i", 0.820, "c", 2.22, "i"),
+#c("Muscovite",  2.831, "a",  2.32, "b", 1.03, "f", 0.796, "i", 2.25, "i"),
+#c("Illite",     2.660, "a",  1.85, "d", 0.861,"i", 0.808, "e", 2.15, "i"),
+#c("Smectite (montmorillonite)",2.608,"a",1.88,"d", 0.907, "i", 0.795, "e",2.07,"i"),
+#c("Chlorite",   2.800, "a",  5.15, "b", 2.25, "f", 0.818, "i", 2.29, "i"),
+#c("Pyrite",     5.011, "a", 19.21, "b", 7.40, "i", 0.518, "g", 2.60, "i"),
+#c("Seawater",   1.025, "h", 0.596, "h",0.146, "h", 3.993, "h", 4.093, "i")
+```
+
+#### Output hourly
+
+```{r}
+
+find_time_comparison_function <- function(forcing_list) {
+  # Initialize variables to store the latest start time and earliest end time
+  latest_start_time <- -Inf
+  earliest_end_time <- Inf
+  latest_start_function <- NULL
+  earliest_end_function <- NULL
+  
+  # Loop over the list of functions and compare start and end times
+  for (function_name in names(forcing_list)) {
+    df <- forcing_list[[function_name]]
+    
+    # Get the first and last value of the "Second" column, first column
+    first_second <- min(df[,1])
+    last_second <- max(df[,1])
+    
+    # Check if this function starts later than the current latest start time
+    if (first_second > latest_start_time) {
+      latest_start_time <- first_second
+      latest_start_function <- function_name
+    }
+    
+    # Check if this function ends earlier than the current earliest end time
+    if (last_second < earliest_end_time) {
+      earliest_end_time <- last_second
+      earliest_end_function <- function_name
+    }
+  }
+  
+  # Return the result as a named list
+  list(
+    LatestStartFunction = latest_start_function,
+    FirstSecond = latest_start_time,
+    EarliestEndFunction = earliest_end_function,
+    LastSecond = earliest_end_time
+  )
+}
+
+
+```
+
+```{r}
+
+# Example usage with the forcing functions list
+forcing_functions <- list(
+  f_Pressure = fPair_WaS.wad,
+  f_Airtemperature = fTair_WaS.wad,
+  f_Waterheight = fHeight_A_Den.wad,
+  f_Watertemperature = fTwater_A.wad, # instead of den Helder RWS WT, we used sensor measured interface water temperature at + 2cm
+  f_Qrel = fHumidity_WaS.wad,
+  f_Solarradiation = fRad_WaS.wad,
+  f_Windspeed = fWind_WaS.wad,
+  f_Cloudiness = fCloud_WaS.wad
+)
+
+find_time_comparison_function(forcing_functions)
+
+
+```
+so we should start from 7200 seconds to 1208700 seconds
+
+```{r}
+# --- Convert each forcing .wad object to numeric double matrix (in place) ---
+
+# Helper: convert data.frame to numeric matrix with 2 columns (time, value)
+to_forcing_matrix <- function(df) {
+  stopifnot(ncol(df) >= 2)
+  m <- cbind(
+    as.numeric(df[[1]]),
+    as.numeric(df[[2]])
+  )
+  storage.mode(m) <- "double"
+  m
+}
+
+# List all forcing variable names you want to process
+# For station A
+forcing_names <- c(
+  "fPair_WaS.wad",
+  "fTair_WaS.wad",
+  "fHeight_A_Den.wad",
+  "fTwater_A.wad",
+  "fHeight_B_Den.wad",
+  "fTwater_B.wad",
+  "fHumidity_WaS.wad",
+  "fRad_WaS.wad",
+  "fWind_WaS.wad",
+  "fCloud_WaS.wad"
+)
+
+# Loop through and overwrite each variable in the global environment
+for (nm in forcing_names) {
+  if (exists(nm, envir = .GlobalEnv)) {
+    obj <- get(nm, envir = .GlobalEnv)
+    if (is.data.frame(obj)) {
+      assign(nm, to_forcing_matrix(obj), envir = .GlobalEnv)
+      message("✅ Converted to double matrix: ", nm)
+    } else {
+      message("⚠️ Skipped (not a data.frame): ", nm)
+    }
+  } else {
+    message("⚠️ Object not found: ", nm)
+  }
+}
+
+# ✅ After this, each e.g. fTwater_A.wad, fRad_WaS.wad, etc. is now:
+# num [1:..., 1:2]  (double matrix)
+# ready for:  forcings = list(fWaterTemp = fTwater_A.wad, ...)
+
+```
+
+```{r}
+times  <- seq(from=7200, to=1208700, by=3600) 
+
+#use A water H
+# Tout.wad_A_A <- sedTemp1D(length.z=length.z, dz.1=dz.1,
+#                            Temp.ini=20,      Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z), times=times, porosity=porfun,
+#                dependencyT = dependencyT,cpSolid=cpSolid,
+#                tcSolid=tcSolid,
+#                emAir = emAir,
+#                emSed = emSed,
+#                dalton = dalton,
+#                stanton = stanton,
+#                albedoSed=albedoSed,
+#                kdWater = kdWater,
+#                albedoWater = albedoWater,
+#                fPressure=fPair_WaS.wad,
+#                fAirTemperature=fTair_WaS.wad, 
+#                fWaterHeight=fHeight_A_Den.wad,
+#                fWaterTemp=fTwater_A.wad, 
+#                fAirHumidity=fHumidity_WaS.wad
+#                fSolarRadiation=fRad_WaS.wad, 
+#                fWindSpeed=fWind_WaS.wad, 
+#                fCloudiness = fCloud_WaS.wad,sedpos=c(0, 0.03, 0.15))
+
+Tout.wad_A_A <- TempSED_run1D(z_max=length.z, dz_1=dz.1,
+                           T_ini=20,      Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z), times=times, porosity=porfun,
+               dependency_on_T = dependencyT,
+               parms = list(cp_solid=cpSolid,
+                            tc_solid =tcSolid,
+                            em_air = emAir, 
+                            dalton = dalton,
+                            stanton = stanton,
+                            albedo_sediment =albedoSed,
+                            kd_water = kdWater,
+                            albedo_water = albedoWater),
+               f_Pressure=fPair_WaS.wad,
+               f_Airtemperature=fTair_WaS.wad, 
+               f_Waterheight=fHeight_A_Den.wad,
+               f_Watertemperature=fTwater_A.wad, 
+               f_Qrel=fHumidity_WaS.wad,
+               f_Solarradiation=fRad_WaS.wad, 
+               f_Windspeed=fWind_WaS.wad, 
+               f_Cloudiness = fCloud_WaS.wad,sedpos=c(0, 0.03, 0.15))
+
+Tout.wad_B_B <- TempSED_run1D(z_max=length.z, dz_1=dz.1,
+                           T_ini=20,      Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z), times=times, porosity=porfun,
+               dependency_on_T = dependencyT,
+               parms = list(cp_solid=cpSolid,
+                            tc_solid =tcSolid,
+                            em_air = emAir, 
+                            dalton = dalton,
+                            stanton = stanton,
+                            albedo_sediment =albedoSed,
+                            kd_water = kdWater,
+                            albedo_water = albedoWater),
+               f_Pressure=fPair_WaS.wad,
+               f_Airtemperature=fTair_WaS.wad, 
+               f_Waterheight=fHeight_B_Den.wad,
+               f_Watertemperature=fTwater_B.wad, 
+               f_Qrel=fHumidity_WaS.wad,
+               f_Solarradiation=fRad_WaS.wad, 
+               f_Windspeed=fWind_WaS.wad, 
+               f_Cloudiness = fCloud_WaS.wad,sedpos=c(0, 0.03, 0.15))
+
+```
+
+#### A function to show 10cm band of model data fitting
+
+
+```{r}
+ModelBandDataPlot <- function(out, Tsed="Tsed_0.05", Tsed_up="Tsed_0.02", Tsed_down="Tsed_0.08", 
+                              Obsdat=Obsdat_ZK1.1, Date.from="2021-11-01", Date.to="2022-11-01",
+                              data.type="l", title="depth=0.05m", right.ylim_water=c(0, 100), right.ylim_radiation=c(0, 100), cex.text=1.7, cex.legend=0.8, cex.main=1,
+                              offset = 0, ...) {
+  
+  # Define full time range (xlim) as one year
+  xlim <- as.POSIXct(c(Date.from, Date.to), origin="1970-01-01")
+  # the data (Sediment Temperature on the left Y-axis)
+  idat <- which(Obsdat$Time >= Date.from & Obsdat$Time <= Date.to)
+  plot(Obsdat$Time[idat], Obsdat$Temperature[idat], 
+       type=data.type, lwd=2, col="red", xlab="", ylab="Sediment temperature (°C)", 
+       main=title, cex.main=cex.main, xlim=xlim, las=1, ...)
+  
+  # the model output
+  origin <- "2018-08-07 00:00:00"
+  DT.times <- as.POSIXct(out[,"time"], origin = origin)
+  # Apply time offset (in hours): when offset = 2, subtract 2 hours from model time
+  DT.times <- DT.times - as.difftime(offset, units = "hours")
+  
+  ii <- which(DT.times >= Date.from & DT.times <= Date.to)
+  lines(DT.times[ii], out[ii, Tsed])
+  xx <- c(DT.times[ii], rev(DT.times[ii]))
+  yy <- c(out[ii, Tsed_up], rev(out[ii, Tsed_down]))
+  polygon(xx, yy, col = alpha.col("lightgrey", alpha=1), border = NA)
+  
+  # Legend for temperature data and model
+  legend("topleft", legend=c("Data", "Model"), col=c("red", "black"), lty=1, lwd=2:1, cex=cex.legend)
+  
+  ## Solar Radiation as a polygon (scaled by dividing by scale.factor)
+  par(new=TRUE)
+  plot(DT.times[ii], out[ii, "Solarradiation"], type="n", axes=FALSE, xlab="", ylab="", ylim=right.ylim_radiation, xlim=xlim)
+  polygon(c(DT.times[ii[1]], DT.times[ii], DT.times[ii[length(ii)]], DT.times[ii[1]]),
+          c(0, out[ii, "Solarradiation"], 0, 0), border=NA, col=alpha.col("yellow", alpha=1))
+  
+  # Add the first y-axis on the right
+  axis(4, col = "#DAA520", col.axis = "#DAA520", las = 1)  # las = 1 for horizontal tick labels
+  mtext("Solar radiation (W/m²)", side = 4, line = 3, col = "#DAA520", cex=cex.text)  # Add label for the first y-axis
+  
+  ## Water Height as a polygon (use a different color)
+  par(new=TRUE)
+  plot(DT.times[ii], out[ii, "Waterheight"], type="n", axes=FALSE, xlab="", ylab="", ylim=right.ylim_water, xlim=xlim)
+  polygon(c(DT.times[ii[1]], DT.times[ii], DT.times[ii[length(ii)]], DT.times[ii[1]]),
+          c(0, out[ii, "Waterheight"], 0, 0), border=NA, col=alpha.col("blue", alpha=1))
+  
+  # Add the secondary y-axis on the right
+  axis(4, col = "blue", col.axis = "blue", line = 5, las=1)  # Adjust line for separation
+  mtext("Water height (m)", side = 4, line = 7, col = "blue", cex=cex.text)  # Add label for secondary y-axis
+
+  ## Re-plot the sediment temperature data (as it's been overwritten by the other plots)
+  par(new=TRUE)
+  plot(Obsdat$Time[idat], Obsdat$Temperature[idat], 
+       type=data.type, lwd=2, col="red", xlab="", ylab="Sediment temperature (°C)", 
+       main=title, cex.main=cex.main, xlim=xlim, las=1, ...)
+  lines(DT.times[ii], out[ii, Tsed], lwd=2)
+}
+
+
+```
+
+
+#### Station A: Plot model-data fit
+
+```{r,fig.width=10, fig.height=5}
+par(mfrow=c(1,1), mar=c(4,5,4,9))
+#3cm
+ModelBandDataPlot(Tout.wad_A_A, Tsed="Tsed_0.03", "Tsed_0.03", "Tsed_0.03", Obsdat_A_3cm, "2018-08-08", "2018-08-20", ylim=c(10, 30), title = "A_3cm", right.ylim_water =c(0, 5), right.ylim_radiation =c(0, 1000),cex.legend=0.8,cex.text = 1,cex.main=1, offset = 2)
+#15cm
+ModelBandDataPlot(Tout.wad_A_A, Tsed="Tsed_0.15", "Tsed_0.15", "Tsed_0.15", Obsdat_A_15cm, "2018-08-08", "2018-08-20", ylim=c(10, 30), title = "A_15cm", right.ylim_water =c(0, 5), right.ylim_radiation =c(0, 1000),cex.legend=0.8,cex.text = 1,cex.main=1, offset = 2)
+```
+
+# 4. Scneario analysis
+
+## 4.1 Use 14d time series
+### 4.1.1. Generate shifted water height forcings
+```{r}
+
+# --- Define time shifts ---
+shift_hours <- seq(-6, 6, by = 3)
+shift_seconds <- shift_hours * 3600
+
+# --- Convert to data frame ---
+df_height <- as.data.frame(fHeight_A_Den.wad)
+colnames(df_height) <- c("Second", "H.m")
+
+# --- Model time range ---
+t_start <- 7200
+t_end   <- 1208700
+
+# --- Helper function to shift safely within model time window ---
+shift_and_trim <- function(df, shift_sec) {
+  shifted <- df
+  shifted$Second <- shifted$Second + shift_sec
+  
+  # Trim to ensure coverage of model time window
+  shifted <- shifted[shifted$Second >= t_start & shifted$Second <= t_end, ]
+  
+  # If the shifted series doesn’t start early enough, pad with first value
+  if (min(shifted$Second) > t_start) {
+    shifted <- rbind(
+      data.frame(Second = t_start, H.m = shifted$H.m[1]),
+      shifted
+    )
+  }
+  
+  # If it doesn’t end late enough, pad with last value
+  if (max(shifted$Second) < t_end) {
+    shifted <- rbind(
+      shifted,
+      data.frame(Second = t_end, H.m = tail(shifted$H.m, 1))
+    )
+  }
+  
+  # Convert to matrix for model
+  to_forcing_matrix(shifted)
+}
+
+# --- Create shifted forcing list safely ---
+fHeight_shifted_list <- lapply(shift_seconds, function(s) shift_and_trim(df_height, s))
+names(fHeight_shifted_list) <- paste0("shift_", shift_hours, "h")
+
+### --- 4. Plot comparison of sediment temperatures ---
+cols <- 1:length(names(fHeight_shifted_list))
+
+
+
+plot(NULL, xlim=range(fHeight_shifted_list[[1]][,1]), ylim = range(fHeight_shifted_list[[1]][,2]),
+     xlab = "Time (hours)", ylab = "Water height",
+     main = "tidal phase shift ts")
+
+for (i in 1:length(names(fHeight_shifted_list))){
+  out <- fHeight_shifted_list[[i]]
+  lines(out[, 1], out[, 2], col = cols[i], lwd = 2)
+}
+
+legend("topright", legend = names(fHeight_shifted_list), col = cols, lwd = 2, title = "Shift (hours)")
+
+
+```
+
+
+### 4.1.2. Run the model for each shifted forcing
+```{r}
+# --- Define a function to run one model scenario ---
+Tout_shifted <- lapply(fHeight_shifted_list, function(fH) {
+  TempSED_run1D(
+    z_max = length.z, dz_1 = dz.1,
+    T_ini = 20,
+    Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z),
+    times = times, porosity = porfun,
+    dependency_on_T = dependencyT,
+    parms = list(
+      cp_solid = cpSolid,
+      tc_solid = tcSolid,
+      em_air = emAir,
+      dalton = dalton,
+      stanton = stanton,
+      albedo_sediment = albedoSed,
+      kd_water = kdWater,
+      albedo_water = albedoWater
+    ),
+    f_Pressure = fPair_WaS.wad,
+    f_Airtemperature = fTair_WaS.wad,
+    f_Waterheight = fH,
+    f_Watertemperature = fTwater_A.wad, # Onshore station A
+    f_Qrel = fHumidity_WaS.wad,
+    f_Solarradiation = fRad_WaS.wad,
+    f_Windspeed = fWind_WaS.wad,
+    f_Cloudiness = fCloud_WaS.wad,
+    sedpos = c(0, 0.03, 0.15)
+  )
+})
+
+
+```
+
+### 4.1.3 Plot all scenarios together (base R)
+
+```{r}
+# 3 cm
+cols <- c("blue", "green", "black", "orange", "red")
+
+# png(paste0(wd,"/Graphs/3cm_TideShift.png"),width=600, height =450, units = "px")
+plot(NULL, NULL,
+     xlim = range(Tout_shifted[[1]][,"time"])/3600,
+     ylim = c(10, 35),
+     xlab = "Time (hours since start)",
+     ylab = "Sediment temperature (°C)",
+     main = "Sediment temperature response to tidal phase shift (3 cm)")
+
+for (i in seq_along(Tout_shifted)) {
+  lines(Tout_shifted[[i]][,"time"]/3600,
+        Tout_shifted[[i]][,"Tsed_0.03"],
+        col = cols[i], lwd = 2)
+}
+
+legend("topright", legend = paste(shift_hours, "h"),
+       col = cols, lwd = 2, title = "Water height shift")
+# dev.off()
+### 15 cm
+
+# png(paste0(wd,"/Graphs/15cm_TideShift.png"),width=600, height =450, units = "px")
+cols <- c("blue", "green", "black", "orange", "red")
+
+plot(NULL, NULL,
+     xlim = range(Tout_shifted[[1]][,"time"])/3600,
+     ylim = c(15, 27),
+     xlab = "Time (hours since start)",
+     ylab = "Sediment temperature (°C)",
+     main = "Sediment temperature response to tidal phase shift (15 cm)")
+
+for (i in seq_along(Tout_shifted)) {
+  lines(Tout_shifted[[i]][,"time"]/3600,
+        Tout_shifted[[i]][,"Tsed_0.15"],
+        col = cols[i], lwd = 2)
+}
+
+legend("topright", legend = paste(shift_hours, "h"),
+       col = cols, lwd = 2, title = "Water height shift")
+# dev.off()
+```
+
+
+
+## 4.2. Focus on mean diurnal cycle
+
+### 4.2.1 Filter all forcings
+```{r}
+
+# --- Time limits in seconds ---
+t_start <- 7200
+t_end   <- 1208700
+
+# --- Helper function to filter forcing data ---
+filter_forcing <- function(df) {
+  df[df[,1] >= t_start & df[,1] <= t_end, , drop = FALSE]
+}
+
+# --- Apply to each forcing ---
+fWind_WaS.wad_filt      <- filter_forcing(fWind_WaS.wad)%>%as.data.frame();names(fWind_WaS.wad_filt)[1] = "Second"
+fRad_WaS.wad_filt       <- filter_forcing(fRad_WaS.wad)%>%as.data.frame();names(fRad_WaS.wad_filt)[1] = "Second"
+fTair_WaS.wad_filt      <- filter_forcing(fTair_WaS.wad)%>%as.data.frame();names(fTair_WaS.wad_filt)[1] = "Second"
+fPair_WaS.wad_filt      <- filter_forcing(fPair_WaS.wad)%>%as.data.frame();names(fPair_WaS.wad_filt)[1] = "Second"
+fHumidity_WaS.wad_filt  <- filter_forcing(fHumidity_WaS.wad)%>%as.data.frame();names(fHumidity_WaS.wad_filt)[1] = "Second"
+fCloud_WaS.wad_filt     <- filter_forcing(fCloud_WaS.wad)%>%as.data.frame();names(fCloud_WaS.wad_filt)[1] = "Second"
+fHeight_A_Den.wad_filt  <- filter_forcing(fHeight_A_Den.wad)%>%as.data.frame();names(fHeight_A_Den.wad_filt)[1] = "Second"
+fTwater_A.wad_filt <- filter_forcing(fTwater_A.wad)%>%as.data.frame();names(fTwater_A.wad_filt)[1] = "Second"
+
+```
+
+### 4.2.2 compute the diurnal mean for each filtered dataset
+
+```{r}
+
+
+library(dplyr)
+library(lubridate)
+
+start_time <- as.POSIXct("2018-08-08 00:00:00", tz = "UTC")
+
+forcing_to_diurnal <- function(df) {
+  df %>%
+    mutate(
+      datetime = start_time + Second,
+      hour = hour(datetime)
+    ) %>%
+    group_by(hour) %>%
+    summarise(across(-c(Second, datetime), mean, na.rm = TRUE)) %>%
+    mutate(Second = hour * 3600) %>%
+    select(Second, everything())
+}
+
+fWind_diurnal     <- forcing_to_diurnal(fWind_WaS.wad_filt)
+fRad_diurnal      <- forcing_to_diurnal(fRad_WaS.wad_filt)
+fTair_diurnal     <- forcing_to_diurnal(fTair_WaS.wad_filt)
+fPair_diurnal     <- forcing_to_diurnal(fPair_WaS.wad_filt)
+fHumidity_diurnal <- forcing_to_diurnal(fHumidity_WaS.wad_filt)
+fCloud_diurnal    <- forcing_to_diurnal(fCloud_WaS.wad_filt)
+fHeight_diurnal   <- forcing_to_diurnal(fHeight_A_Den.wad_filt)
+fTwater_A_diurnal   <- forcing_to_diurnal(fTwater_A.wad_filt)
+
+### Water height lowest point coincide with the highest water temperature
+
+
+par(mar=c(5,5,5,5))
+plot(fHeight_diurnal$hour, fHeight_diurnal$V2, 
+     yaxt="n", xlab = "hour", ylab = "water level")
+axis(2)
+legend("topleft",c("water level", "water height (m)"),pch =c(1,NA),lty=c(NA,1),col=1:2)
+
+par(new=T)
+plot(fTwater_A_diurnal$hour, fTwater_A_diurnal$V2, t="l", col=2, ylab="", xlab="", yaxt="n")
+axis(4)
+lines(fTair_diurnal$hour, fTair_diurnal$V2, col=3)
+mtext("water/sediment interface temperature", side =4, line = 2)
+
+```
+
+
+### 4.2.3 Cyclic shift: 
+
+```{r}
+
+# Helper function
+# Shift forcing time series forward by N hours (cyclically)
+shift_forcing_hours <- function(df, hours_shift, time_step = 3600) {
+  n_shift <- hours_shift * 3600 / time_step  # how many rows to shift
+  n <- nrow(df)
+  
+  # Circular (wrap-around) shift
+  shifted_values <- c(df[(n_shift + 1):n, 3][[1]], df[1:n_shift,3][[1]])
+  
+  # Reuse same time column
+  data.frame(Second = df[, 1], hour = df[,2], V2 = df[,3], shifted = shifted_values)
+}
+
+#### Example
+# Assume fHeight_diurnal and fTwater_diurnal are your averaged diurnal forcings
+fHeight_shift3 <- shift_forcing_hours(fHeight_diurnal, 3)
+fHeight_shift6 <- shift_forcing_hours(fHeight_diurnal, 6)
+
+fTwater_shift3 <- shift_forcing_hours(fTwater_A_diurnal, 3)
+fTwater_shift6 <- shift_forcing_hours(fTwater_A_diurnal, 6)
+
+#### Quick visual check
+plot(fHeight_diurnal$Second/3600, fHeight_diurnal$V2, type="l", lwd=2, ylim=range(fHeight_diurnal$V2),
+     xlab="Hour of Day", ylab="Water Height (m)", main="Phase Shift of Water Height")
+lines(fHeight_shift3$Second/3600, fHeight_shift3$shifted, col="blue", lwd=2, lty=2)
+lines(fHeight_shift6$Second/3600, fHeight_shift6$shifted, col="red", lwd=2, lty=3)
+legend("topright", legend=c("Original", "+3h shift", "+6h shift"),
+       col=c("black", "blue", "red"), lty=1:3, lwd=2)
+
+```
+
+### 4.2.3.1 modified tide cycle (to add exposure time)
+```{r}
+
+
+#### Example
+# Assume fHeight_diurnal and fTwater_diurnal are your averaged diurnal forcings
+fHeight_diurnal$V2[fHeight_diurnal$V2<0.3] = 0
+fHeight_shift3 <- shift_forcing_hours(fHeight_diurnal, 3)
+fHeight_shift6 <- shift_forcing_hours(fHeight_diurnal, 6)
+
+fTwater_shift3 <- shift_forcing_hours(fTwater_A_diurnal, 3)
+fTwater_shift6 <- shift_forcing_hours(fTwater_A_diurnal, 6)
+
+#### Quick visual check
+plot(fHeight_diurnal$Second/3600, fHeight_diurnal$V2, type="l", lwd=2, ylim=range(fHeight_diurnal$V2),
+     xlab="Hour of Day", ylab="Water Height (m)", main="Phase Shift of Water Height")
+lines(fHeight_shift3$Second/3600, fHeight_shift3$shifted, col="blue", lwd=2, lty=2)
+lines(fHeight_shift6$Second/3600, fHeight_shift6$shifted, col="red", lwd=2, lty=3)
+legend("topright", legend=c("Original", "+3h shift", "+6h shift"),
+       col=c("black", "blue", "red"), lty=1:3, lwd=2)
+```
+
+### 4.2.4. run Scenarios
+
+##### 4.2.4.1 shifted tide and water temperrature
+```{r}
+
+### --- 1. Helper: circular shift of forcing by hours ---
+shift_forcing_hours <- function(df, hours_shift, time_step = 3600) {
+  n_shift <- hours_shift * 3600 / time_step
+  n <- nrow(df)
+  # Circular (wrap-around) shift
+  shifted_values <- c(df[(n_shift + 1):n, 3][[1]], df[1:n_shift,3][[1]])
+  
+    # Reuse same time column
+  cbind(Second = df[, 1], shifted = shifted_values)
+}
+
+### --- 2. Create shifted versions for both forcings ---
+# assume fHeight_A_Den.wad and fTwater_A.wad are already filtered and hourly
+
+fHeight_shifted_list <- list(
+  "0h"  = fHeight_diurnal[,c(1,3)]%>%as.matrix(),
+  "+3h" = shift_forcing_hours(fHeight_diurnal, 3),
+  "+6h" = shift_forcing_hours(fHeight_diurnal, 6)
+)
+
+fTwater_shifted_list <- list(
+  "0h"  = fTwater_A_diurnal[,c(1,3)]%>%as.matrix(),
+  "+3h" = shift_forcing_hours(fTwater_A_diurnal, 3),
+  "+6h" = shift_forcing_hours(fTwater_A_diurnal, 6)
+)
+
+### --- 3. Run model for each shifted combination ---
+Tout_shifted <- list()
+
+times_diurnal <- fPair_diurnal$Second
+for (i in names(fHeight_shifted_list)) {
+  Tout_shifted[[i]] <- TempSED_run1D(
+    z_max = length.z, dz_1 = dz.1,
+    T_ini = 20,
+    Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z),
+    times = times_diurnal, porosity = porfun,
+    dependency_on_T = dependencyT,
+    parms = list(
+      cp_solid = cpSolid,
+      tc_solid = tcSolid,
+      em_air = emAir,
+      dalton = dalton,
+      stanton = stanton,
+      albedo_sediment = albedoSed,
+      kd_water = kdWater,
+      albedo_water = albedoWater
+    ),
+    f_Pressure = as.matrix(fPair_diurnal[,c(1,3)]),
+    f_Airtemperature = as.matrix(fTair_diurnal[,c(1,3)]),
+    f_Waterheight = as.matrix(fHeight_shifted_list[[i]]),
+    f_Watertemperature = as.matrix(fTwater_shifted_list[[i]]),
+    # f_Watertemperature = as.matrix(fTwater_A_diurnal[,c(1,3)]),
+    f_Qrel = as.matrix(fHumidity_diurnal[,c(1,3)]),
+    f_Solarradiation = as.matrix(fRad_diurnal[,c(1,3)]),
+    f_Windspeed = as.matrix(fWind_diurnal[,c(1,3)]),
+    f_Cloudiness = as.matrix(fCloud_diurnal[,c(1,3)]),
+    sedpos = c(0, 0.03, 0.15)
+  )
+  message("✅ Finished run for shift: ", i)
+}
+
+
+### --- 4. Plot comparison of sediment temperatures ---
+cols <- c("black", "blue", "red")
+plot(NULL, xlim = range(times_diurnal)/3600, ylim = c(10, 30),
+     xlab = "Time (hours)", ylab = "Sediment temperature (°C)",
+     main = "Effect of tidal phase shift on sediment temperature at 3 cm")
+
+for (i in seq_along(Tout_shifted)) {
+  out <- Tout_shifted[[i]]
+  lines(out[, "time"]/3600, out[, "Tsed_0.03"], col = cols[i], lwd = 2)
+}
+
+legend("topright", legend = names(Tout_shifted), col = cols, lwd = 2, title = "Shift (hours)")
+
+### At 15 cm
+cols <- c("black", "blue", "red")
+plot(NULL, xlim = range(times_diurnal)/3600, ylim = c(10, 30),
+     xlab = "Time (hours)", ylab = "Sediment temperature (°C)",
+     main = "Effect of tidal phase shift on sediment temperature at 15cm")
+
+for (i in seq_along(Tout_shifted)) {
+  out <- Tout_shifted[[i]]
+  lines(out[, "time"]/3600, out[, "Tsed_0.15"], col = cols[i], lwd = 2)
+}
+
+legend("topright", legend = names(Tout_shifted), col = cols, lwd = 2, title = "Shift (hours)")
+
+```
+
+
+#### 4.2. Increased water temperature
+
+```{r}
+### --- 1. Helper: circular shift of forcing by hours ---
+shift_forcing_hours <- function(df, hours_shift, time_step = 3600) {
+  n_shift <- hours_shift * 3600 / time_step
+  n <- nrow(df)
+  # Circular (wrap-around) shift
+  shifted_values <- c(df[(n_shift + 1):n, 3][[1]], df[1:n_shift,3][[1]])
+  
+    # Reuse same time column
+  cbind(Second = df[, 1], shifted = shifted_values)
+}
+
+### --- 2. Create shifted versions for both forcings ---
+# assume fHeight_A_Den.wad and fTwater_A.wad are already filtered and hourly
+
+fHeight_shifted_list <- list(
+  "0h"  = fHeight_diurnal[,c(1,3)]%>%as.matrix(),
+  "+3h" = shift_forcing_hours(fHeight_diurnal, 3),
+  "+6h" = shift_forcing_hours(fHeight_diurnal, 6)
+)
+
+### --- 1. Helper: circular shift of forcing by hours ---
+change_T <- function(df, dT, time_step = 3600) {
+
+  changed_values <- df[,3]+dT
+  
+  # Reuse same time column
+  cbind(Second = df[, 1], changed = changed_values)
+}
+
+fTwater_changed_list <- list(
+  "0C"  = fTwater_A_diurnal[,c(1,3)]%>%as.matrix(),
+  "+2C" = change_T(fTwater_A_diurnal, 2),
+  "+4C" = change_T(fTwater_A_diurnal, 4)
+)
+
+
+Tout_shifted <- list()
+
+times_diurnal <- fPair_diurnal$Second
+for (i in names(fTwater_changed_list)) {
+  Tout_shifted[[i]] <- TempSED_run1D(
+    z_max = length.z, dz_1 = dz.1,
+    T_ini = 20,
+    Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z),
+    times = times_diurnal, porosity = porfun,
+    dependency_on_T = dependencyT,
+    parms = list(
+      cp_solid = cpSolid,
+      tc_solid = tcSolid,
+      em_air = emAir,
+      dalton = dalton,
+      stanton = stanton,
+      albedo_sediment = albedoSed,
+      kd_water = kdWater,
+      albedo_water = albedoWater
+    ),
+    f_Pressure = as.matrix(fPair_diurnal[,c(1,3)]),
+    # f_Airtemperature = as.matrix(fTair_diurnal[,c(1,3)]),
+    # f_Waterheight = as.matrix(fHeight_shifted_list[[i]]),
+    # f_Watertemperature = as.matrix(fTwater_shifted_list[[i]]),
+    f_Airtemperature = as.matrix(fTair_diurnal[,c(1,3)]),
+    f_Waterheight = as.matrix(fHeight_shifted_list[[1]]),
+    f_Watertemperature = as.matrix(fTwater_changed_list[[i]]),
+    f_Qrel = as.matrix(fHumidity_diurnal[,c(1,3)]),
+    f_Solarradiation = as.matrix(fRad_diurnal[,c(1,3)]),
+    f_Windspeed = as.matrix(fWind_diurnal[,c(1,3)]),
+    f_Cloudiness = as.matrix(fCloud_diurnal[,c(1,3)]),
+    sedpos = c(0, 0.03, 0.15)
+  )
+  message("✅ Finished run for shift: ", i)
+}
+
+### --- 4. Plot comparison of sediment temperatures ---
+cols <- c("black", "blue", "red")
+plot(NULL, xlim = range(times_diurnal)/3600, ylim = c(10, 30),
+     xlab = "Time (hours)", ylab = "Sediment temperature (°C)",
+     main = "Effect of interface water temperature on sediment temperature at 3 cm")
+
+for (i in seq_along(Tout_shifted)) {
+  out <- Tout_shifted[[i]]
+  lines(out[, "time"]/3600, out[, "Tsed_0.03"], col = cols[i], lwd = 2)
+}
+
+legend("topright", legend = names(Tout_shifted), col = cols, lwd = 2, title = "Shift (hours)")
+
+
+### At 15 cm
+cols <- c("black", "blue", "red")
+plot(NULL, xlim = range(times_diurnal)/3600, ylim = c(10, 30),
+     xlab = "Time (hours)", ylab = "Sediment temperature (°C)",
+     main = "Effect of interface water temperature on sediment temperature at 15cm")
+
+for (i in seq_along(Tout_shifted)) {
+  out <- Tout_shifted[[i]]
+  lines(out[, "time"]/3600, out[, "Tsed_0.15"], col = cols[i], lwd = 2)
+}
+
+legend("topright", legend = names(Tout_shifted), col = cols, lwd = 2, title = "Shift (hours)")
+
+```
+
+
+
+##### 4.2.4.3 Increased air temperature
+```{r}
+
+### --- 1. Helper: circular shift of forcing by hours ---
+change_T <- function(df, dT, time_step = 3600) {
+
+  changed_values <- df[,3]+dT
+  
+  # Reuse same time column
+  cbind(Second = df[, 1], changed = changed_values)
+}
+
+### --- 2. Create shifted versions for both forcings ---
+# assume fHeight_A_Den.wad and fTwater_A.wad are already filtered and hourly
+
+fTair_changed_list <- list(
+  "0C"  = fTair_diurnal[,c(1,3)]%>%as.matrix(),
+  "+2C" = change_T(fTair_diurnal, 2),
+  "+4C" = change_T(fTair_diurnal, 4)
+)
+
+
+### --- 3. Run model for each shifted combination ---
+Tout_shifted <- list()
+
+times_diurnal <- fPair_diurnal$Second
+for (i in names(fTair_changed_list)) {
+  Tout_shifted[[i]] <- TempSED_run1D(
+    z_max = length.z, dz_1 = dz.1,
+    T_ini = 20,
+    Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z),
+    times = times_diurnal, porosity = porfun,
+    dependency_on_T = dependencyT,
+    parms = list(
+      cp_solid = cpSolid,
+      tc_solid = tcSolid,
+      em_air = emAir,
+      dalton = dalton,
+      stanton = stanton,
+      albedo_sediment = albedoSed,
+      kd_water = kdWater,
+      albedo_water = albedoWater
+    ),
+    f_Pressure = as.matrix(fPair_diurnal[,c(1,3)]),
+    # f_Airtemperature = as.matrix(fTair_diurnal[,c(1,3)]),
+    # f_Waterheight = as.matrix(fHeight_shifted_list[[i]]),
+    # f_Watertemperature = as.matrix(fTwater_shifted_list[[i]]),
+    f_Airtemperature = as.matrix(fTair_changed_list[[i]]),
+    f_Waterheight = as.matrix(fHeight_shifted_list[[1]]),
+    f_Watertemperature = as.matrix(fTwater_A_diurnal[,c(1,3)]),
+    f_Qrel = as.matrix(fHumidity_diurnal[,c(1,3)]),
+    f_Solarradiation = as.matrix(fRad_diurnal[,c(1,3)]),
+    f_Windspeed = as.matrix(fWind_diurnal[,c(1,3)]),
+    f_Cloudiness = as.matrix(fCloud_diurnal[,c(1,3)]),
+    sedpos = c(0, 0.03, 0.15)
+  )
+  message("✅ Finished run for shift: ", i)
+}
+
+### --- 4. Plot comparison of sediment temperatures ---
+cols <- c("black", "blue", "red")
+plot(NULL, xlim = range(times_diurnal)/3600, ylim = c(10, 30),
+     xlab = "Time (hours)", ylab = "Sediment temperature (°C)",
+     main = "Effect of air temperature increase on sediment temperature at 3cm")
+
+for (i in seq_along(Tout_shifted)) {
+  out <- Tout_shifted[[i]]
+  lines(out[, "time"]/3600, out[, "Tsed_0.03"], col = cols[i], lwd = 2)
+}
+
+legend("topright", legend = names(Tout_shifted), col = cols, lwd = 2, title = "Shift (hours)")
+
+### At 15 cm
+cols <- c("black", "blue", "red")
+plot(NULL, xlim = range(times_diurnal)/3600, ylim = c(10, 30),
+     xlab = "Time (hours)", ylab = "Sediment temperature (°C)",
+     main = "Effect of air temperature increase on sediment temperature at 15cm")
+
+for (i in seq_along(Tout_shifted)) {
+  out <- Tout_shifted[[i]]
+  lines(out[, "time"]/3600, out[, "Tsed_0.15"], col = cols[i], lwd = 2)
+}
+
+legend("topright", legend = names(Tout_shifted), col = cols, lwd = 2, title = "Shift (hours)")
+
+
+
+```
+No differences when changing air temperature?? -> Reply: because the averaged water height is always greater than zero, meaning it is always submerged. So water temperature is influencing sediment temperature, but not air temperature.
+
+# 5. Visualization
+## 5.1  a function to plot daily average temperature profiles
+### 4.1.2. Run the model for each shifted forcing
+```{r}
+Plot_DailyAverageT <- function(Data=Tout.wad_A_A, title1="", title2=""){
+#par(oma=c(2,0,0,0), mar=c(4,4,4,2), cex=1.5)
+Temp <- subset(Data, which="Temperature")
+times <- Data[,1]
+DT.times <- as.POSIXct(times, origin=as.POSIXct("2018-08-07 00:00:00", tz = "CET"))
+DT.d <- as.Date(DT.times, tz = "CET")
+
+Jul  <- julian(DT.d)
+Tday <- NULL
+for (i in 1:ncol(Temp)){
+  Tday <- cbind(Tday, tapply(Temp[,i], INDEX=Jul, FUN=mean))
+}
+#Tday is a dataframe whose columns are 100 layers and rows are 366 days
+DT.day <- unique(DT.d)
+#DT.day is date from 2021-10-31 to 2022-10-31
+Grid <- attributes(Data)$grid
+
+par(mfrow=c(1,2))
+par(mar = c(2, 1, 3, 3))
+#par(mar = c(3, 4, 3, 5))
+image2D(
+  x = DT.day,
+  y = Grid$x.mid,
+  z = Tday,
+  ylim = c(10, 0),
+  las = 1,
+  xaxt = "n",
+  yaxt = "n",
+  xlab = "Date",
+  ylab = "Depth (cm)",
+  main = title1,
+  clab = "°C",
+  contour = list(levels = c(15, 20, 25, 30), labcex = 1.2),
+  zlim = c(15, 30),
+  colkey = list(dist = 0.08)  # default is 0, increase to move right
+)
+
+
+axis(1, at = c(DT.day[1], DT.day[length(DT.day)/3], DT.day[length(DT.day)*2/3], DT.day[length(DT.day)]), 
+labels = c(DT.day[1], DT.day[length(DT.day)/3], DT.day[length(DT.day)*2/3], DT.day[length(DT.day)]), las = 1)
+axis(2, at=seq(10,0, by=-2), labels = TRUE)
+
+
+#axis.POSIXct(1,at = seq(from = DT.day[1],to = DT.day[length(DT.day)],by = "4 months"), format = "%b", las=1)  
+
+par(mar = c(4, 1, 2, 4))  # Add space on right side for color key
+matplot(y = Grid$x.mid, x = t(Tday), type = "l", main = title2, las = 1,
+        col = jet.col(367), ylim = c(10, 0), xlim = c(0, 25),
+        xaxs = "i", lty = 1, yaxt = "n", xlab = "Temperature (°C)", yaxs = "i")
+
+axis(2, at = seq(10, 0, by = -2), labels = FALSE)
+
+colkey(col = jet.col(367),
+       clim = c(0, 365),
+       clab = c("", "Day"),
+       add = TRUE,
+       dist = 0.05,         # Positive distance → right of plot
+       length = 0.5,
+       cex.clab = 0.7,
+       at = c(0, 100, 200, 300))
+}
+Plot_DailyAverageT(Data=Tout.wad_A_A, title1="Daily average sediment temperature profile at Station A", title2="Sediment temperature profiles at Station A")
+Plot_DailyAverageT(Data=Tout.wad_B_B, title1="Daily average sediment temperature profile at Station B", title2="Sediment temperature profiles at Station B")
+
+```
+

@@ -1,0 +1,901 @@
+# 6. DEB temperature tolerance evaluation
+## 6.1. DEB model parameterization for estuarine bivalves
+```{r}
+# EXPLORING IMPACTS TEMPERATURES ON ESTUARINE BIVALVES
+# STABLE VERSUS FLUCTUATING SST
+# AVERAGE OF 22 DEGREE CELSIUS
+# RANGE 20-24 DEGREES CELSIUS
+
+## STEP 1: DATA IMPORT & SELECTION
+setwd() # set your working directory 
+# "..\\2022 Ms0 Philippart ea Heatwave 2018\\r script"
+
+# import species' count (PC) file
+BIV <- read.table(file = "cp_2022.08.27_MOK2018.txt", header = TRUE, dec = ",")
+
+# check if import & selection was performed correctly
+names(BIV)
+str(BIV)
+summary(BIV)
+
+# DEB parameter values & equations
+
+# Sources for DEB parameter values:
+# BK: Bas Kooijman website DEB (2013) "Species.xl" downloaded on 30/8/2013
+# BS: Brecht Stechele et al. (2022) Conserv Physiol 10(1): coac034; doi:10.1093/conphys/coac034.
+# CM: Cristian Monaco et al. (2019) Mar Biol 166, 14
+# FM: Francesc Maynou et al. (2021) Sci Tot Env 777, 1460668 
+# HV: Henk van der Veer et al. (2006) Journal of Sea Research 56, 107-124
+# TS: Tim Schellekens (2012) IMARES Rapport C088/12
+# TT: Tineke Troost et al (2010) Phil. Trans. R. Soc. B 365, 3567-3577
+
+# TEMPERATURE
+T1     = 293     # reference temperature (293 Kelvin = 20 Celcius)
+
+# Cerastoderma edule (HV)
+TAce   = 5800    # Arrhenius temperature (Kelvin)
+TLce   = 278     # lower boundary of tolerance range (Kelvin)
+THce   = 306     # upper boundary of tolerance range (Kelvin) 
+TALce  = 51154   # Arrhenius temperature for rate of decrease at lower boundary (Kelvin)
+TAHce  = 47126   # Arrhenius temperature for rate of decrease at upper boundary (Kelvin)
+
+# Crasosstrea gigas (HV/BS for THcg)
+TAcg   = 5800    # Arrhenius temperature (Kelvin)
+TLcg   = 281     # lower boundary of tolerance range (Kelvin)
+THcg   = 300     # upper boundary of tolerance range (Kelvin) 
+TALcg  = 75000   # Arrhenius temperature for rate of decrease at lower boundary (Kelvin)
+TAHcg  = 30000   # Arrhenius temperature for rate of decrease at upper boundary (Kelvin)
+
+# Ensis directus (TS) nb: after correction of original table
+TAed   = 6000    # Arrhenius temperature (Kelvin)
+TLed   = 278     # lower boundary of tolerance range (Kelvin)
+THed   = 306     # upper boundary of tolerance range (Kelvin) 
+TALed  = 51154   # Arrhenius temperature for rate of decrease at lower boundary (Kelvin)
+TAHed  = 17500   # Arrhenius temperature for rate of decrease at upper boundary (Kelvin)
+
+# Mya arenaria (HV)
+TAma   = 7051    # Arrhenius temperature (Kelvin)
+TLma   = 278     # lower boundary of tolerance range (Kelvin)
+THma   = 306     # upper boundary of tolerance range (Kelvin) 
+TALma  = 1300000 # Arrhenius temperature for rate of decrease at lower boundary (Kelvin)
+TAHma  = 30117   # Arrhenius temperature for rate of decrease at upper boundary (Kelvin)
+
+# Macoma balthica (HV)
+TAmb   = 5800    # Arrhenius temperature (Kelvin)
+TLmb   = 273     # lower boundary of tolerance range (Kelvin)
+THmb   = 290     # upper boundary of tolerance range (Kelvin) 
+TALmb  = 6700000 # Arrhenius temperature for rate of decrease at lower boundary (Kelvin)
+TAHmb  = 49368   # Arrhenius temperature for rate of decrease at upper boundary (Kelvin)
+
+# Mytilus edulis (HV)
+TAme   = 5800    # Arrhenius temperature (Kelvin)
+TLme   = 275     # lower boundary of tolerance range (Kelvin)
+THme   = 296     # upper boundary of tolerance range (Kelvin) 
+TALme  = 45430   # Arrhenius temperature for rate of decrease at lower boundary (Kelvin)
+TAHme  = 31376   # Arrhenius temperature for rate of decrease at upper boundary (Kelvin)
+
+# Mytilus galloprovincialis (CM)
+TAmg   = 5000    # Arrhenius temperature (Kelvin)
+TLmg   = 275     # lower boundary of tolerance range (Kelvin)
+THmg   = 296     # upper boundary of tolerance range (Kelvin) 
+TALmg  = 45430   # Arrhenius temperature for rate of decrease at lower boundary (Kelvin)
+TAHmg  = 31376   # Arrhenius temperature for rate of decrease at upper boundary (Kelvin)
+
+# Ostrea edulis (BS)
+TAoe   = 5000    # Arrhenius temperature (Kelvin)
+TLoe   = 286     # lower boundary of tolerance range (Kelvin)
+THoe   = 303     # upper boundary of tolerance range (Kelvin) 
+TALoe  = 23000   # Arrhenius temperature for rate of decrease at lower boundary (Kelvin)
+TAHoe  = 55610   # Arrhenius temperature for rate of decrease at upper boundary (Kelvin)
+
+# Ruditapes philippinarum (FM)
+TArp   = 6071    # Arrhenius temperature (Kelvin)
+TLrp   = 290     # lower boundary of tolerance range (Kelvin)
+THrp   = 300     # upper boundary of tolerance range (Kelvin) 
+TALrp  = 30424   # Arrhenius temperature for rate of decrease at lower boundary (Kelvin)
+TAHrp  = 299859  # Arrhenius temperature for rate of decrease at upper boundary (Kelvin)
+
+###########
+## FIGURE 2
+## Relationship between temperature and physiological rates of intertidal estuarine bivalve species
+## Equation from Troost et al (2010) Phil. Trans. R. Soc. B 365, 3567-3577
+
+#A. CALCULATIONS
+TempRange <- seq(from = 273, to = 320, by = 1) # from 0 to 47 degrees Celsius
+TempRange
+
+TR2ce <-  exp(TAce/T1-TAce/TempRange)*(1+exp(TALce/T1-TALce/TLce)+exp(TAHce/THce-TAHce/T1))/(1+exp(TALce/TempRange-TALce/TLce)+exp(TAHce/THce-TAHce/TempRange))
+TR2cg <-  exp(TAcg/T1-TAcg/TempRange)*(1+exp(TALcg/T1-TALcg/TLcg)+exp(TAHcg/THcg-TAHcg/T1))/(1+exp(TALcg/TempRange-TALcg/TLcg)+exp(TAHcg/THcg-TAHcg/TempRange))
+TR2ed <-  exp(TAed/T1-TAed/TempRange)*(1+exp(TALed/T1-TALed/TLed)+exp(TAHed/THed-TAHed/T1))/(1+exp(TALed/TempRange-TALed/TLed)+exp(TAHed/THed-TAHed/TempRange))
+TR2ma <-  exp(TAma/T1-TAma/TempRange)*(1+exp(TALma/T1-TALma/TLma)+exp(TAHma/THma-TAHma/T1))/(1+exp(TALma/TempRange-TALma/TLma)+exp(TAHma/THma-TAHma/TempRange))
+TR2mb <-  exp(TAmb/T1-TAmb/TempRange)*(1+exp(TALmb/T1-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/T1))/(1+exp(TALmb/TempRange-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/TempRange))
+TR2me <-  exp(TAme/T1-TAme/TempRange)*(1+exp(TALme/T1-TALme/TLme)+exp(TAHme/THme-TAHme/T1))/(1+exp(TALme/TempRange-TALme/TLme)+exp(TAHme/THme-TAHme/TempRange))
+TR2mg <-  exp(TAmg/T1-TAmg/TempRange)*(1+exp(TALmg/T1-TALmg/TLmg)+exp(TAHmg/THmg-TAHmg/T1))/(1+exp(TALmg/TempRange-TALmg/TLmg)+exp(TAHmg/THmg-TAHmg/TempRange))
+TR2oe <-  exp(TAoe/T1-TAoe/TempRange)*(1+exp(TALoe/T1-TALoe/TLoe)+exp(TAHoe/THoe-TAHoe/T1))/(1+exp(TALoe/TempRange-TALoe/TLoe)+exp(TAHoe/THoe-TAHoe/TempRange))
+TR2rp <-  exp(TArp/T1-TArp/TempRange)*(1+exp(TALrp/T1-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/T1))/(1+exp(TALrp/TempRange-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/TempRange))
+
+
+# PLOT
+par(mfrow = c(1,1))
+
+plot (y = TR2mb, x = TempRange, type = "p", col = "white", ylim = c(0,4),
+      xlab = "Temperature (K)", ylab = "Relative physiological rate (-)")
+
+lines(TempRange, TR2ce, lty=1, lwd=2, col=2)
+lines(TempRange, TR2cg, lty=1, lwd=2, col=3)
+lines(TempRange, TR2ed, lty=1, lwd=2, col=4)
+lines(TempRange, TR2ma, lty=1, lwd=2, col=5)
+lines(TempRange, TR2mb, lty=1, lwd=2, col=6)
+lines(TempRange, TR2me, lty=1, lwd=2, col=8)
+lines(TempRange, TR2mg, lty=2, lwd=2, col=8)
+lines(TempRange, TR2oe, lty=1, lwd=2, col=7)
+lines(TempRange, TR2rp, lty=1, lwd=2, col=9)
+
+X00 <- c(273,273)
+X10 <- c(283,283)
+X20 <- c(293,293)
+X30 <- c(303,303)
+X40 <- c(313,313)
+Y   <- c(0,4)
+
+Xr  <- c(273,320)
+Yr  <- c(1,1)
+
+lines(X00, Y, lty=7,lwd=1, col="grey") #  0C
+lines(X10, Y, lty=7,lwd=1, col="grey") # 10C
+lines(X20, Y, lty=7,lwd=2, col="grey") # 20C
+lines(X30, Y, lty=7,lwd=1, col="grey") # 30C
+lines(X40, Y, lty=7,lwd=1, col="grey") # 40C
+
+lines(Xr, Yr, lty=7,lwd=2, col="grey") # reference (FR=1 at 20C)
+
+
+legend.txt <- c("C.edule","C.gigas","E.directus","M.arenaria","M.balthica","M.edulis","M.galloprovincialis","O.edulis","R.philippinarum")
+legend ("topright", legend = legend.txt,
+        lty = c(1,1,1,1,1,1,2,1,1),
+        lwd = c(2,2,2,2,2,2,2,2,2),
+        col = c(2,3,4,5,6,8,8,7,9),
+        bty = "o", cex = 0.9)
+
+
+```
+
+##  sediment temperature ts
+```{r}
+
+###########
+## FIGURE 3
+## Development of temperatures on a tidal flat at 2 cm above and at 3 cm and 15 cm below the sediment surface
+## in the Mok bay (Texel, the Netherlands) from 7 to xx 2018 
+
+#B. PLOT
+
+# 1 panel
+par(mfrow = c(1,1))
+str(BIV)
+
+plot (y = BIV$StatA02cmA, x = BIV$DayTime, type = "p", col = "white", ylim = c(15,35),
+      xlab = "Day (August 2018)", ylab = "Temperature (degrees Celsius)")
+
+lines(BIV$DayTime, BIV$StatA02cmA, lty=1, lwd=3, col=2)
+lines(BIV$DayTime, BIV$StatA03cmU, lty=1, lwd=2, col=2)
+lines(BIV$DayTime, BIV$StatA15cmU, lty=1, lwd=1, col=2)
+
+lines(BIV$DayTime, BIV$StatB02cmA, lty=1, lwd=3, col=3)
+lines(BIV$DayTime, BIV$StatB03cmU, lty=1, lwd=2, col=3)
+lines(BIV$DayTime, BIV$StatB15cmU, lty=1, lwd=1, col=3)
+
+lines(BIV$DayTime, BIV$StatD02cmA, lty=1, lwd=3, col=4)
+lines(BIV$DayTime, BIV$StatD03cmU, lty=1, lwd=2, col=4)
+lines(BIV$DayTime, BIV$StatD15cmU, lty=1, lwd=1, col=4)
+
+legend.txt <- c("A+3", "A-2", "A-15", "B+3", "B-2", "B-15","C+3", "C-2", "C-15")
+legend ("topright", legend = legend.txt,
+        col = c(2,2,2,3,3,3,4,4,4),
+        lty = c(1,1,1,1,1,1,1,1,1),
+        lwd = c(3,2,1,3,2,1,3,2,1),
+        bty = "o", cex = 0.9)
+
+# 9 panels
+par(mfrow = c(3,3), mar = c(3,5,2,1))
+plot (StatA02cmA ~ DayTime, type = "l", ylim = c(15,36),data = BIV)
+plot (StatA03cmU ~ DayTime, type = "l", ylim = c(15,36),data = BIV)
+plot (StatA15cmU ~ DayTime, type = "l", ylim = c(15,36),data = BIV)
+
+
+plot (StatB02cmA ~ DayTime, type = "l", ylim = c(15,36),data = BIV)
+plot (StatB03cmU ~ DayTime, type = "l", ylim = c(15,36),data = BIV)
+plot (StatB15cmU ~ DayTime, type = "l", ylim = c(15,36),data = BIV)
+
+plot (StatD02cmA ~ DayTime, type = "l", ylim = c(15,36),data = BIV)
+plot (StatD03cmU ~ DayTime, type = "l", ylim = c(15,36),data = BIV)
+plot (StatD15cmU ~ DayTime, type = "l", ylim = c(15,36),data = BIV)
+
+```
+
+
+```{r}
+###########
+## FIGURE 4
+## Potential physiological rates of intertidal estuarine bivalve species 
+## on a tidal flat at 2 cm above and at 3 cm and 15 cm below the sediment surface
+## in the Mok bay (Texel, the Netherlands) from 7 to 20 August 2018 
+## Equation from Troost et al (2010) Phil. Trans. R. Soc. B 365, 3567-3577
+## Temperature data Mok2018 by Philippart & Dethmers (2018, unpublished)
+
+#A. CALCULATIONS
+
+## EPIBENTHOS (Crassostrea, Mytilus & Ostrea)
+
+#  Station A
+BIV$A02 <- BIV$StatA02cmA+273
+BIV$TRcgA <-  exp(TAcg/T1-TAcg/BIV$A02)*(1+exp(TALcg/T1-TALcg/TLcg)+exp(TAHcg/THcg-TAHcg/T1))/(1+exp(TALcg/BIV$A02-TALcg/TLcg)+exp(TAHcg/THcg-TAHcg/BIV$A02))
+BIV$TRmeA <-  exp(TAme/T1-TAme/BIV$A02)*(1+exp(TALme/T1-TALme/TLme)+exp(TAHme/THme-TAHme/T1))/(1+exp(TALme/BIV$A02-TALme/TLme)+exp(TAHme/THme-TAHme/BIV$A02))
+BIV$TRmgA <-  exp(TAmg/T1-TAmg/BIV$A02)*(1+exp(TALmg/T1-TALmg/TLmg)+exp(TAHmg/THmg-TAHmg/T1))/(1+exp(TALmg/BIV$A02-TALmg/TLmg)+exp(TAHmg/THmg-TAHmg/BIV$A02))
+BIV$TRoeA <-  exp(TAoe/T1-TAoe/BIV$A02)*(1+exp(TALoe/T1-TALoe/TLoe)+exp(TAHoe/THoe-TAHoe/T1))/(1+exp(TALoe/BIV$A02-TALoe/TLoe)+exp(TAHoe/THoe-TAHoe/BIV$A02))
+
+#  Station B
+BIV$B02 <- BIV$StatB02cmA+273
+BIV$TRcgB <-  exp(TAcg/T1-TAcg/BIV$B02)*(1+exp(TALcg/T1-TALcg/TLcg)+exp(TAHcg/THcg-TAHcg/T1))/(1+exp(TALcg/BIV$B02-TALcg/TLcg)+exp(TAHcg/THcg-TAHcg/BIV$B02))
+BIV$TRmeB <-  exp(TAme/T1-TAme/BIV$B02)*(1+exp(TALme/T1-TALme/TLme)+exp(TAHme/THme-TAHme/T1))/(1+exp(TALme/BIV$B02-TALme/TLme)+exp(TAHme/THme-TAHme/BIV$B02))
+BIV$TRmgB <-  exp(TAmg/T1-TAmg/BIV$B02)*(1+exp(TALmg/T1-TALmg/TLmg)+exp(TAHmg/THmg-TAHmg/T1))/(1+exp(TALmg/BIV$B02-TALmg/TLmg)+exp(TAHmg/THmg-TAHmg/BIV$B02))
+BIV$TRoeB <-  exp(TAoe/T1-TAoe/BIV$B02)*(1+exp(TALoe/T1-TALoe/TLoe)+exp(TAHoe/THoe-TAHoe/T1))/(1+exp(TALoe/BIV$B02-TALoe/TLoe)+exp(TAHoe/THoe-TAHoe/BIV$B02))
+
+#  Station C
+BIV$C02 <- BIV$StatD02cmA+273
+BIV$TRcgC <-  exp(TAcg/T1-TAcg/BIV$C02)*(1+exp(TALcg/T1-TALcg/TLcg)+exp(TAHcg/THcg-TAHcg/T1))/(1+exp(TALcg/BIV$C02-TALcg/TLcg)+exp(TAHcg/THcg-TAHcg/BIV$C02))
+BIV$TRmeC <-  exp(TAme/T1-TAme/BIV$C02)*(1+exp(TALme/T1-TALme/TLme)+exp(TAHme/THme-TAHme/T1))/(1+exp(TALme/BIV$C02-TALme/TLme)+exp(TAHme/THme-TAHme/BIV$C02))
+BIV$TRmgC <-  exp(TAmg/T1-TAmg/BIV$C02)*(1+exp(TALmg/T1-TALmg/TLmg)+exp(TAHmg/THmg-TAHmg/T1))/(1+exp(TALmg/BIV$C02-TALmg/TLmg)+exp(TAHmg/THmg-TAHmg/BIV$C02))
+BIV$TRoeC <-  exp(TAoe/T1-TAoe/BIV$C02)*(1+exp(TALoe/T1-TALoe/TLoe)+exp(TAHoe/THoe-TAHoe/T1))/(1+exp(TALoe/BIV$C02-TALoe/TLoe)+exp(TAHoe/THoe-TAHoe/BIV$C02))
+
+# B. PLOTS
+
+# Time series temperature response
+par(mfrow = c(3,4), mar = c(3,5,2,1))
+plot (TRcgA ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRmeA ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRmgA ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRoeA ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+
+plot (TRcgB ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRmeB ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRmgB ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRoeB ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+
+plot (TRcgC ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRmeC ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRmgC ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRoeC ~ DayTime, type = "l", ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+
+# TABEL
+names(BIV)
+sapply(BIV[c(17:20,22:25,27:30)], mean)
+sapply(BIV[c(17:20,22:25,27:30)], sd)
+sapply(BIV[c(17:20,22:25,27:30)], min)
+
+
+## SHALLOW-BURIED MACROZOOBENTHOS (short siphons: Cerastoderma, Ensis & Ruditapes)
+
+#  Station A
+BIV$A03   <- BIV$StatA03cmU+273
+BIV$TRceA <-  exp(TAce/T1-TAce/BIV$A03)*(1+exp(TALce/T1-TALce/TLce)+exp(TAHce/THce-TAHce/T1))/(1+exp(TALce/BIV$A03-TALce/TLce)+exp(TAHce/THce-TAHce/BIV$A03))
+BIV$TRedA <-  exp(TAed/T1-TAed/BIV$A03)*(1+exp(TALed/T1-TALed/TLed)+exp(TAHed/THed-TAHed/T1))/(1+exp(TALed/BIV$A03-TALed/TLed)+exp(TAHed/THed-TAHed/BIV$A03))
+BIV$TRrpA <-  exp(TArp/T1-TArp/BIV$A03)*(1+exp(TALrp/T1-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/T1))/(1+exp(TALrp/BIV$A03-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/BIV$A03))
+
+#  Station B
+BIV$B03   <- BIV$StatB03cmU+273
+BIV$TRceB <-  exp(TAce/T1-TAce/BIV$B03)*(1+exp(TALce/T1-TALce/TLce)+exp(TAHce/THce-TAHce/T1))/(1+exp(TALce/BIV$B03-TALce/TLce)+exp(TAHce/THce-TAHce/BIV$B03))
+BIV$TRedB <-  exp(TAed/T1-TAed/BIV$B03)*(1+exp(TALed/T1-TALed/TLed)+exp(TAHed/THed-TAHed/T1))/(1+exp(TALed/BIV$B03-TALed/TLed)+exp(TAHed/THed-TAHed/BIV$B03))
+BIV$TRrpB <-  exp(TArp/T1-TArp/BIV$B03)*(1+exp(TALrp/T1-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/T1))/(1+exp(TALrp/BIV$B03-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/BIV$B03))
+
+#  Station C
+BIV$C03   <- BIV$StatD03cmU+273
+BIV$TRceC <-  exp(TAce/T1-TAce/BIV$C03)*(1+exp(TALce/T1-TALce/TLce)+exp(TAHce/THce-TAHce/T1))/(1+exp(TALce/BIV$C03-TALce/TLce)+exp(TAHce/THce-TAHce/BIV$C03))
+BIV$TRedC <-  exp(TAed/T1-TAed/BIV$C03)*(1+exp(TALed/T1-TALed/TLed)+exp(TAHed/THed-TAHed/T1))/(1+exp(TALed/BIV$C03-TALed/TLed)+exp(TAHed/THed-TAHed/BIV$C03))
+BIV$TRrpC <-  exp(TArp/T1-TArp/BIV$C03)*(1+exp(TALrp/T1-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/T1))/(1+exp(TALrp/BIV$C03-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/BIV$C03))
+
+
+# B. PLOTS
+
+# Time series temperature response
+par(mfrow = c(3,3), mar = c(3,5,2,1))
+plot (TRceA ~ DayTime, type = "l",  ylim = c(0,2), data = BIV) 
+abline(h=1, col=8)
+plot (TRedA ~ DayTime, type = "l",  ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRrpA ~ DayTime, type = "l",  ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+
+plot (TRceB ~ DayTime, type = "l",  ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRedB ~ DayTime, type = "l",  ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRrpB ~ DayTime, type = "l",  ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+
+plot (TRceC ~ DayTime, type = "l",  ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRedC ~ DayTime, type = "l",  ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRrpC ~ DayTime, type = "l",  ylim = c(0,2), data = BIV)
+abline(h=1, col=8)
+
+# TABEL
+names(BIV)
+sapply(BIV[c(32:34,36:38,40:42)], mean)
+sapply(BIV[c(32:34,36:38,40:42)], sd)
+sapply(BIV[c(32:34,36:38,40:42)], min)
+
+
+## DEEP-BURIED MACROZOOBENTHOS (long siphons: Mya & Macoma)
+
+#  Station A
+BIV$A15 <- BIV$StatA15cmU+273
+BIV$TRmaA <-  exp(TAma/T1-TAma/BIV$A15)*(1+exp(TALma/T1-TALma/TLma)+exp(TAHma/THma-TAHma/T1))/(1+exp(TALma/BIV$A15-TALma/TLma)+exp(TAHma/THma-TAHma/BIV$A15))
+BIV$TRmbA <-  exp(TAmb/T1-TAmb/BIV$A15)*(1+exp(TALmb/T1-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/T1))/(1+exp(TALmb/BIV$A15-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/BIV$A15))
+
+#  Station B
+BIV$B15 <- BIV$StatB15cmU+273
+BIV$TRmaB <-  exp(TAma/T1-TAma/BIV$B15)*(1+exp(TALma/T1-TALma/TLma)+exp(TAHma/THma-TAHma/T1))/(1+exp(TALma/BIV$B15-TALma/TLma)+exp(TAHma/THma-TAHma/BIV$B15))
+BIV$TRmbB <-  exp(TAmb/T1-TAmb/BIV$B15)*(1+exp(TALmb/T1-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/T1))/(1+exp(TALmb/BIV$B15-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/BIV$B15))
+
+#  Station C
+BIV$C15 <- BIV$StatD15cmU+273
+BIV$TRmaC <-  exp(TAma/T1-TAma/BIV$C15)*(1+exp(TALma/T1-TALma/TLma)+exp(TAHma/THma-TAHma/T1))/(1+exp(TALma/BIV$C15-TALma/TLma)+exp(TAHma/THma-TAHma/BIV$C15))
+BIV$TRmbC <-  exp(TAmb/T1-TAmb/BIV$C15)*(1+exp(TALmb/T1-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/T1))/(1+exp(TALmb/BIV$C15-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/BIV$C15))
+
+# B. PLOTS
+
+# Time series temperature response
+par(mfrow = c(3,2), mar = c(3,5,2,1))
+plot (TRmaA ~ DayTime, type = "l", ylim=c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRmbA ~ DayTime, type = "l", ylim=c(0,2), data = BIV)
+abline(h=1, col=8)
+
+plot (TRmaB ~ DayTime, type = "l", ylim=c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRmbB ~ DayTime, type = "l", ylim=c(0,2), data = BIV)
+abline(h=1, col=8)
+
+plot (TRmaC ~ DayTime, type = "l", ylim=c(0,2), data = BIV)
+abline(h=1, col=8)
+plot (TRmbC ~ DayTime, type = "l", ylim=c(0,2), data = BIV)
+abline(h=1, col=8)
+
+# TABEL
+names(BIV)
+sapply(BIV[c(44:45,47:48,50:51)], mean, na.rm = TRUE)
+sapply(BIV[c(44:45,47:48,50:51)], sd,   na.rm = TRUE)
+sapply(BIV[c(44:45,47:48,50:51)], min,  na.rm = TRUE)
+
+
+
+
+##########################
+## ADDITIONAL CALCULATIONS
+
+# EXTRA A. ADAPTATIVE BURROWING BEHAVIOUR MACROZOOBENTHOS
+
+# If Cerastoderma,Ensis & Ruditapes go to deeper areas:
+BIV$TRceAd <-  exp(TAce/T1-TAce/BIV$A15)*(1+exp(TALce/T1-TALce/TLce)+exp(TAHce/THce-TAHce/T1))/(1+exp(TALce/BIV$A15-TALce/TLce)+exp(TAHce/THce-TAHce/BIV$A15))
+BIV$TRedAd <-  exp(TAed/T1-TAed/BIV$A15)*(1+exp(TALed/T1-TALed/TLed)+exp(TAHed/THed-TAHed/T1))/(1+exp(TALed/BIV$A15-TALed/TLed)+exp(TAHed/THed-TAHed/BIV$A15))
+BIV$TRrpAd <-  exp(TArp/T1-TArp/BIV$A15)*(1+exp(TALrp/T1-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/T1))/(1+exp(TALrp/BIV$A15-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/BIV$A15))
+
+BIV$TRceBd <-  exp(TAce/T1-TAce/BIV$B15)*(1+exp(TALce/T1-TALce/TLce)+exp(TAHce/THce-TAHce/T1))/(1+exp(TALce/BIV$B15-TALce/TLce)+exp(TAHce/THce-TAHce/BIV$B15))
+BIV$TRedBd <-  exp(TAed/T1-TAed/BIV$B15)*(1+exp(TALed/T1-TALed/TLed)+exp(TAHed/THed-TAHed/T1))/(1+exp(TALed/BIV$B15-TALed/TLed)+exp(TAHed/THed-TAHed/BIV$B15))
+BIV$TRrpBd <-  exp(TArp/T1-TArp/BIV$B15)*(1+exp(TALrp/T1-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/T1))/(1+exp(TALrp/BIV$B15-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/BIV$B15))
+
+BIV$TRceCd <-  exp(TAce/T1-TAce/BIV$C15)*(1+exp(TALce/T1-TALce/TLce)+exp(TAHce/THce-TAHce/T1))/(1+exp(TALce/BIV$C15-TALce/TLce)+exp(TAHce/THce-TAHce/BIV$C15))
+BIV$TRedCd <-  exp(TAed/T1-TAed/BIV$C15)*(1+exp(TALed/T1-TALed/TLed)+exp(TAHed/THed-TAHed/T1))/(1+exp(TALed/BIV$C15-TALed/TLed)+exp(TAHed/THed-TAHed/BIV$C15))
+BIV$TRrpCd <-  exp(TArp/T1-TArp/BIV$C15)*(1+exp(TALrp/T1-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/T1))/(1+exp(TALrp/BIV$C15-TALrp/TLrp)+exp(TAHrp/THrp-TAHrp/BIV$C15))
+
+# If Macoma go to more shallow areas:
+BIV$TRmbAs <-  exp(TAmb/T1-TAmb/BIV$A03)*(1+exp(TALmb/T1-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/T1))/(1+exp(TALmb/BIV$A03-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/BIV$A03))
+BIV$TRmbBs <-  exp(TAmb/T1-TAmb/BIV$B03)*(1+exp(TALmb/T1-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/T1))/(1+exp(TALmb/BIV$B03-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/BIV$B03))
+BIV$TRmbCs <-  exp(TAmb/T1-TAmb/BIV$C03)*(1+exp(TALmb/T1-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/T1))/(1+exp(TALmb/BIV$C03-TALmb/TLmb)+exp(TAHmb/THmb-TAHmb/BIV$C03))
+
+# TABEL
+names(BIV)
+sapply(BIV[c(52:63)], mean, na.rm = TRUE)
+sapply(BIV[c(52:63)], sd,   na.rm = TRUE)
+sapply(BIV[c(52:63)], min,  na.rm = TRUE)
+
+
+## EXTRA B. COMPARISON Vught & Zimmerman (1974; Fig. 8)
+#     Temperatures at 3 cm depth
+#     2018: 
+max(BIV$A03-273) # 28.95 (vs. 24 in 1974, delta is 5)
+max(BIV$B03-273) # 25.90 (vs. 20 in 1974, delta is 6)
+max(BIV$C03-273) # 25.90 (vs. 18 in 1974, delta is 8)
+
+# Therefore:
+BIV$A03VZ <- BIV$A03-5
+BIV$B03VZ <- BIV$B03-6
+BIV$C03VZ <- BIV$C03-8
+
+# For cockles, this would mean:
+BIV$TRceAVZ <-  exp(TAce/T1-TAce/BIV$A03VZ)*(1+exp(TALce/T1-TALce/TLce)+exp(TAHce/THce-TAHce/T1))/(1+exp(TALce/BIV$A03VZ-TALce/TLce)+exp(TAHce/THce-TAHce/BIV$A03VZ))
+BIV$TRceBVZ <-  exp(TAce/T1-TAce/BIV$B03VZ)*(1+exp(TALce/T1-TALce/TLce)+exp(TAHce/THce-TAHce/T1))/(1+exp(TALce/BIV$B03VZ-TALce/TLce)+exp(TAHce/THce-TAHce/BIV$B03VZ))
+BIV$TRceCVZ <-  exp(TAce/T1-TAce/BIV$C03VZ)*(1+exp(TALce/T1-TALce/TLce)+exp(TAHce/THce-TAHce/T1))/(1+exp(TALce/BIV$C03VZ-TALce/TLce)+exp(TAHce/THce-TAHce/BIV$C03VZ))
+
+# TABEL
+names(BIV)
+sapply(BIV[c(67:69)], mean, na.rm = TRUE)
+sapply(BIV[c(67:69)], sd,   na.rm = TRUE)
+sapply(BIV[c(67:69)], min,  na.rm = TRUE)
+
+
+```
+
+## DEB. FIGURE 5
+```{r}
+## FIGURE 5
+## SUMMARY TABELS FINAL RESULTS 
+
+## TABEL I
+## Average FR in August 2018
+
+# 'NORMAL' DEPTH
+#     EPIBENTHOS                              ENDOBENTHOS
+#                                             Shallow                             Deep
+#     TRcg      TRme      TRmg      TRoe      TRce        TRed        TRrp        TRma      TRmb 
+# A   0.961     0.869     0.866     1.052     1.068       1.044       1.096       1.061     0.818
+# B   0.989     0.884     0.877     1.090     1.066       1.048       1.145       1.077     0.743
+# C   1.005     0.905     0.897     1.097     1.078       1.056       1.170       1.079     0.728
+# NB1: Highest FR for Ruditapes (station C), lowest for Macoma (station C)
+# NB2: For most species, highest FR at station C, but highest FR for Macoma at station A (!)
+
+
+# EXTRA: ADAPTATION IN DEPTH
+#                                             TRceD       TRedD       TRrpD         TRmaS     TRmbS 
+# A    x         x        x           x       1.053       1.039       1.118         x         0.937
+# B    x         x        x           x       1.068       1.051       1.151         x         0.801
+# C    x         x        x           x       1.069       1.052       1.156         x         0.756
+# NB1: If cockles and razor clams would go deeper, this would decrease (!) their FR
+# NB2: If Manila clams would go deeper, this would increase their FR at stations A & B, but not at C
+# NB2: If Baltic tellins would go more shallow, this would increase (!) their FR
+
+# EXTRA: 1974
+#                                             TRceVZ       
+# A    x         x        x          x        0.763       
+# B    x         x        x          x        0.708       
+# C    x         x        x          x        0.618       
+# NB1: FR of cockles lower in 1974 than in 2018 (!)
+# NB2: FR higher at high tidal flats in 1974, whilst FR higher at low tidal flats in 2018 (!)
+
+
+# PLOT FINAL RESULTS
+
+# A. Epibenthos
+par(mfrow = c(1,1))
+
+x.f  <- c(1,2,3)
+y.f  <- c(0,2,4)
+cg.f <- c(0.961,     
+          0.989,     
+          1.005)
+me.f <- c(0.869,     
+          0.884,     
+          0.905)
+mg.f <- c(0.866,     
+          0.877,     
+          0.897)
+oe.f <- c(1.052,     
+          1.090,     
+          1.097)
+
+plot (y = y.f, x = x.f, type = "p", col = "white", ylim = c(0.8,1.2),
+      xlab = "Station", ylab = "Relative physiological rate (-)")
+
+Xrf  <- c(1,3)
+Yrf  <- c(1,1)
+lines(Xrf, Yrf, lty=7,lwd=2, col="grey") # reference (FR=1 at 20C)
+
+lines(x.f, cg.f, lty=1, lwd=2, col=2)
+lines(x.f, me.f, lty=1, lwd=2, col=3)
+lines(x.f, mg.f, lty=1, lwd=2, col=4)
+lines(x.f, oe.f, lty=1, lwd=2, col=5)
+
+legend.txt <- c("C.gigas","M.edulis","M.galloprovincialis","O.edulis")
+legend ("topright", legend = legend.txt,
+        lty = c(1,1,1,1),
+        lwd = c(2,2,2,2),
+        col = c(2,3,4,5),
+        bty = "o", cex = 0.9)
+
+# B. Endobenthos (shallow)
+par(mfrow = c(1,1))
+
+x.f   <- c(1,2,3)
+y.f   <- c(0,2,4)
+ce.f  <- c(1.068,       
+          1.066,       
+          1.078)
+ed.f  <- c(1.044,       
+          1.048,       
+          1.056)
+rp.f  <- c(1.096,       
+          1.145,       
+          1.170)
+ce.fd <- c(1.053,       
+           1.068,       
+           1.069)
+ed.fd <- c(1.039,       
+           1.051,       
+           1.052)
+rp.fd <- c(1.118,         
+           1.151,         
+           1.156)
+
+plot (y = y.f, x = x.f, type = "p", col = "white", ylim = c(1,1.2),
+      xlab = "Station", ylab = "Relative physiological rate (-)")
+
+Xrf  <- c(1,3)
+Yrf  <- c(1,1)
+lines(Xrf, Yrf, lty=7,lwd=2, col="grey") # reference (FR=1 at 20C)
+
+lines(x.f, ce.f, lty=1, lwd=2, col=2)
+lines(x.f, ed.f, lty=1, lwd=2, col=3)
+lines(x.f, rp.f, lty=1, lwd=2, col=4)
+
+lines(x.f, ce.fd, lty=2, lwd=2, col=2)
+lines(x.f, ed.fd, lty=2, lwd=2, col=3)
+lines(x.f, rp.fd, lty=2, lwd=2, col=4)
+
+legend.txt <- c("C.edule","E.directus","R.philippinarum","Ce-15cm","Ed-15cm","Rp-15cm")
+legend ("topleft", legend = legend.txt,
+        lty = c(1,1,1,2,2,2),
+        lwd = c(2,2,2,2,2,2),
+        col = c(2,3,4,2,3,4),
+        bty = "o", cex = 0.9)
+
+# C. Endobenthos (deep)
+par(mfrow = c(1,1))
+
+x.f   <- c(1,2,3)
+y.f   <- c(0,2,4)
+ma.f <- c(0.818,
+          0.743,
+          0.728)
+mb.f  <- c(1.061,     
+           1.077,     
+           1.079)
+mb.fs  <- c(0.937,
+            0.801,
+            0.756)
+
+
+plot (y = y.f, x = x.f, type = "p", col = "white", ylim = c(0.6,1.2),
+      xlab = "Station", ylab = "Relative physiological rate (-)")
+
+Xrf  <- c(1,3)
+Yrf  <- c(1,1)
+lines(Xrf, Yrf, lty=7,lwd=2, col="grey") # reference (FR=1 at 20C)
+
+lines(x.f, ma.f,  lty=1, lwd=2, col=2)
+lines(x.f, mb.f,  lty=1, lwd=2, col=3)
+lines(x.f, mb.fs, lty=2, lwd=2, col=3)
+
+legend.txt <- c("M.arenaria","M.balthica","Mb-3cm")
+legend ("topleft", legend = legend.txt,
+        lty = c(1,1,2),
+        lwd = c(2,2,2),
+        col = c(2,3,3),
+        bty = "o", cex = 0.9)
+
+
+###########
+## FIGURE 6
+## Reduction of maximum physiological rates of intertidal estuarine bivalve species
+## due to growth limitiation or heat stress
+## on a tidal flat at 2 cm above and at 3 cm and 15 cm below the sediment surface
+## in the Mok bay (Texel, the Netherlands) from 7 to 20 August 2018 
+
+TempRange
+
+
+EDmax <- max(TR2ed) 
+MAmax <- max(TR2ma) 
+MBmax <- max(TR2mb) 
+
+
+OEmax <- max(TR2oe) 
+RPmax <- max(TR2rp) 
+
+
+## Epibenthos
+#Cg
+CgOm <- max(TR2cg) # 1.059886 at T=#24 -> 296K (23C)
+CgO  <- 23
+CgL  <-  8
+CgH  <- 27
+
+BIV$CgA.stressed <- NA
+BIV$CgA.stressed[BIV$StatA02cmA <   CgL] <- -2
+BIV$CgA.stressed[BIV$StatA02cmA >=  CgL    & BIV$StatA02cmA <= (CgO-1)] <- -1 
+BIV$CgA.stressed[BIV$StatA02cmA >= (CgO-1) & BIV$StatA02cmA <= (CgO+1)] <-  0 
+BIV$CgA.stressed[BIV$StatA02cmA >  (CgO+1) & BIV$StatA02cmA <= CgH]     <-  1
+BIV$CgA.stressed[BIV$StatA02cmA >   CgH] <-  2
+table(BIV$CgA.stressed)
+
+BIV$CgB.stressed <- NA
+BIV$CgB.stressed[BIV$StatB02cmA <   CgL] <- -2
+BIV$CgB.stressed[BIV$StatB02cmA >=  CgL    & BIV$StatB02cmA <= (CgO-1)] <- -1 
+BIV$CgB.stressed[BIV$StatB02cmA >= (CgO-1) & BIV$StatB02cmA <= (CgO+1)] <-  0 
+BIV$CgB.stressed[BIV$StatB02cmA >  (CgO+1) & BIV$StatB02cmA <= CgH]     <-  1
+BIV$CgB.stressed[BIV$StatB02cmA >   CgH] <-  2
+table(BIV$CgB.stressed)
+
+BIV$CgC.stressed <- NA
+BIV$CgC.stressed[BIV$StatD02cmA <   CgL] <- -2
+BIV$CgC.stressed[BIV$StatD02cmA >=  CgL    & BIV$StatD02cmA <= (CgO-1)] <- -1 
+BIV$CgC.stressed[BIV$StatD02cmA >= (CgO-1) & BIV$StatD02cmA <= (CgO+1)] <-  0 
+BIV$CgC.stressed[BIV$StatD02cmA >  (CgO+1) & BIV$StatD02cmA <= CgH]     <-  1
+BIV$CgC.stressed[BIV$StatD02cmA >   CgH] <-  2
+table(BIV$CgC.stressed)
+
+
+#Me (19)
+MeOm <- max(TR2me) # 1.012954 at T=#20 -> 292K (19C)
+MeO  <- 19
+MeL  <-  2
+MeH  <- 23
+
+BIV$MeA.stressed <- NA
+BIV$MeA.stressed[BIV$StatA02cmA <   MeL] <- -2
+BIV$MeA.stressed[BIV$StatA02cmA >=  MeL    & BIV$StatA02cmA <= (MeO-1)] <- -1 
+BIV$MeA.stressed[BIV$StatA02cmA >= (MeO-1) & BIV$StatA02cmA <= (MeO+1)] <-  0 
+BIV$MeA.stressed[BIV$StatA02cmA >  (MeO+1) & BIV$StatA02cmA <= MeH]     <-  1
+BIV$MeA.stressed[BIV$StatA02cmA >   MeH] <-  2
+table(BIV$MeA.stressed)
+
+BIV$MeB.stressed <- NA
+BIV$MeB.stressed[BIV$StatB02cmA <   MeL] <- -2
+BIV$MeB.stressed[BIV$StatB02cmA >=  MeL    & BIV$StatB02cmA <= (MeO-1)] <- -1 
+BIV$MeB.stressed[BIV$StatB02cmA >= (MeO-1) & BIV$StatB02cmA <= (MeO+1)] <-  0 
+BIV$MeB.stressed[BIV$StatB02cmA >  (MeO+1) & BIV$StatB02cmA <= MeH]     <-  1
+BIV$MeB.stressed[BIV$StatB02cmA >   MeH] <-  2
+table(BIV$MeB.stressed)
+
+BIV$MeC.stressed <- NA
+BIV$MeC.stressed[BIV$StatD02cmA <   MeL] <- -2
+BIV$MeC.stressed[BIV$StatD02cmA >=  MeL    & BIV$StatD02cmA <= (MeO-1)] <- -1 
+BIV$MeC.stressed[BIV$StatD02cmA >= (MeO-1) & BIV$StatD02cmA <= (MeO+1)] <-  0 
+BIV$MeC.stressed[BIV$StatD02cmA >  (MeO+1) & BIV$StatD02cmA <= MeH]     <-  1
+BIV$MeC.stressed[BIV$StatD02cmA >   MeH] <-  2
+table(BIV$MeC.stressed)
+
+#Mg (18)
+MgOm <- max(TR2mg) # 1.023968 at T=#19 -> 291K (18C)
+MgO  <- 18
+MgL  <-  2
+MgH  <- 23
+
+BIV$MgA.stressed <- NA
+BIV$MgA.stressed[BIV$StatA02cmA <   MgL] <- -2
+BIV$MgA.stressed[BIV$StatA02cmA >=  MgL    & BIV$StatA02cmA <= (MgO-1)] <- -1 
+BIV$MgA.stressed[BIV$StatA02cmA >= (MgO-1) & BIV$StatA02cmA <= (MgO+1)] <-  0 
+BIV$MgA.stressed[BIV$StatA02cmA >  (MgO+1) & BIV$StatA02cmA <= MgH]     <-  1
+BIV$MgA.stressed[BIV$StatA02cmA >   MgH] <-  2
+table(BIV$MgA.stressed)
+
+BIV$MgB.stressed <- NA
+BIV$MgB.stressed[BIV$StatB02cmA <   MgL] <- -2
+BIV$MgB.stressed[BIV$StatB02cmA >=  MgL    & BIV$StatB02cmA <= (MgO-1)] <- -1 
+BIV$MgB.stressed[BIV$StatB02cmA >= (MgO-1) & BIV$StatB02cmA <= (MgO+1)] <-  0 
+BIV$MgB.stressed[BIV$StatB02cmA >  (MgO+1) & BIV$StatB02cmA <= MgH]     <-  1
+BIV$MgB.stressed[BIV$StatB02cmA >   MgH] <-  2
+table(BIV$MgB.stressed)
+
+BIV$MgC.stressed <- NA
+BIV$MgC.stressed[BIV$StatD02cmA <   MgL] <- -2
+BIV$MgC.stressed[BIV$StatD02cmA >=  MgL    & BIV$StatD02cmA <= (MgO-1)] <- -1 
+BIV$MgC.stressed[BIV$StatD02cmA >= (MgO-1) & BIV$StatD02cmA <= (MgO+1)] <-  0 
+BIV$MgC.stressed[BIV$StatD02cmA >  (MgO+1) & BIV$StatD02cmA <= MgH]     <-  1
+BIV$MgC.stressed[BIV$StatD02cmA >   MgH] <-  2
+table(BIV$MgC.stressed)
+
+#Oe (26)
+OeOm <- max(TR2Oe) # 1.448982 at T=#27 -> 299K (26C)
+OeO  <- 26
+OeL  <- 13
+OeH  <- 30
+
+BIV$OeA.stressed <- NA
+BIV$OeA.stressed[BIV$StatA02cmA <   OeL] <- -2
+BIV$OeA.stressed[BIV$StatA02cmA >=  OeL    & BIV$StatA02cmA <= (OeO-1)] <- -1 
+BIV$OeA.stressed[BIV$StatA02cmA >= (OeO-1) & BIV$StatA02cmA <= (OeO+1)] <-  0 
+BIV$OeA.stressed[BIV$StatA02cmA >  (OeO+1) & BIV$StatA02cmA <= OeH]     <-  1
+BIV$OeA.stressed[BIV$StatA02cmA >   OeH] <-  2
+table(BIV$OeA.stressed)
+
+BIV$OeB.stressed <- NA
+BIV$OeB.stressed[BIV$StatB02cmA <   OeL] <- -2
+BIV$OeB.stressed[BIV$StatB02cmA >=  OeL    & BIV$StatB02cmA <= (OeO-1)] <- -1 
+BIV$OeB.stressed[BIV$StatB02cmA >= (OeO-1) & BIV$StatB02cmA <= (OeO+1)] <-  0 
+BIV$OeB.stressed[BIV$StatB02cmA >  (OeO+1) & BIV$StatB02cmA <= OeH]     <-  1
+BIV$OeB.stressed[BIV$StatB02cmA >   OeH] <-  2
+table(BIV$OeB.stressed)
+
+BIV$OeC.stressed <- NA
+BIV$OeC.stressed[BIV$StatD02cmA <   OeL] <- -2
+BIV$OeC.stressed[BIV$StatD02cmA >=  OeL    & BIV$StatD02cmA <= (OeO-1)] <- -1 
+BIV$OeC.stressed[BIV$StatD02cmA >= (OeO-1) & BIV$StatD02cmA <= (OeO+1)] <-  0 
+BIV$OeC.stressed[BIV$StatD02cmA >  (OeO+1) & BIV$StatD02cmA <= OeH]     <-  1
+BIV$OeC.stressed[BIV$StatD02cmA >   OeH] <-  2
+table(BIV$OeC.stressed)
+
+
+## Shallow endobenthos
+#Ce (29)
+CeOm <- max(TR2ce) # 1.598104 at T=#30 -> 302K (29C)
+CeO  <- 29
+CeL  <-  5
+CeH  <- 33
+
+BIV$CeA.stressed <- NA
+BIV$CeA.stressed[BIV$StatA03cmU <   CeL] <- -2
+BIV$CeA.stressed[BIV$StatA03cmU >=  CeL    & BIV$StatA03cmU <= (CeO-1)] <- -1 
+BIV$CeA.stressed[BIV$StatA03cmU >= (CeO-1) & BIV$StatA03cmU <= (CeO+1)] <-  0 
+BIV$CeA.stressed[BIV$StatA03cmU >  (CeO+1) & BIV$StatA03cmU <= CeH]     <-  1
+BIV$CeA.stressed[BIV$StatA03cmU >   CeH] <-  2
+table(BIV$CeA.stressed)
+
+BIV$CeB.stressed <- NA
+BIV$CeB.stressed[BIV$StatB03cmU <   CeL] <- -2
+BIV$CeB.stressed[BIV$StatB03cmU >=  CeL    & BIV$StatB03cmU <= (CeO-1)] <- -1 
+BIV$CeB.stressed[BIV$StatB03cmU >= (CeO-1) & BIV$StatB03cmU <= (CeO+1)] <-  0 
+BIV$CeB.stressed[BIV$StatB03cmU >  (CeO+1) & BIV$StatB03cmU <= CeH]     <-  1
+BIV$CeB.stressed[BIV$StatB03cmU >   CeH] <-  2
+table(BIV$CeB.stressed)
+
+BIV$CeC.stressed <- NA
+BIV$CeC.stressed[BIV$StatD03cmU <   CeL] <- -2
+BIV$CeC.stressed[BIV$StatD03cmU >=  CeL    & BIV$StatD03cmU <= (CeO-1)] <- -1 
+BIV$CeC.stressed[BIV$StatD03cmU >= (CeO-1) & BIV$StatD03cmU <= (CeO+1)] <-  0 
+BIV$CeC.stressed[BIV$StatD03cmU >  (CeO+1) & BIV$StatD03cmU <= CeH]     <-  1
+BIV$CeC.stressed[BIV$StatD03cmU >   CeH] <-  2
+table(BIV$CeC.stressed)
+
+
+#Ed (30)
+EdOm <- max(TR2Ed) # 1.353138 at T=#31 -> 303K (30C)
+EdO  <- 30
+EdL  <-  5
+EdH  <- 33
+
+BIV$EdA.stressed <- NA
+BIV$EdA.stressed[BIV$StatA03cmU <   EdL] <- -2
+BIV$EdA.stressed[BIV$StatA03cmU >=  EdL    & BIV$StatA03cmU <= (EdO-1)] <- -1 
+BIV$EdA.stressed[BIV$StatA03cmU >= (EdO-1) & BIV$StatA03cmU <= (EdO+1)] <-  0 
+BIV$EdA.stressed[BIV$StatA03cmU >  (EdO+1) & BIV$StatA03cmU <= EdH]     <-  1
+BIV$EdA.stressed[BIV$StatA03cmU >   EdH] <-  2
+table(BIV$EdA.stressed)
+
+BIV$EdB.stressed <- NA
+BIV$EdB.stressed[BIV$StatB03cmU <   EdL] <- -2
+BIV$EdB.stressed[BIV$StatB03cmU >=  EdL    & BIV$StatB03cmU <= (EdO-1)] <- -1 
+BIV$EdB.stressed[BIV$StatB03cmU >= (EdO-1) & BIV$StatB03cmU <= (EdO+1)] <-  0 
+BIV$EdB.stressed[BIV$StatB03cmU >  (EdO+1) & BIV$StatB03cmU <= EdH]     <-  1
+BIV$EdB.stressed[BIV$StatB03cmU >   EdH] <-  2
+table(BIV$EdB.stressed)
+
+BIV$EdC.stressed <- NA
+BIV$EdC.stressed[BIV$StatD03cmU <   EdL] <- -2
+BIV$EdC.stressed[BIV$StatD03cmU >=  EdL    & BIV$StatD03cmU <= (EdO-1)] <- -1 
+BIV$EdC.stressed[BIV$StatD03cmU >= (EdO-1) & BIV$StatD03cmU <= (EdO+1)] <-  0 
+BIV$EdC.stressed[BIV$StatD03cmU >  (EdO+1) & BIV$StatD03cmU <= EdH]     <-  1
+BIV$EdC.stressed[BIV$StatD03cmU >   EdH] <-  2
+table(BIV$EdC.stressed)
+
+
+#Rp
+RpOm <- max(TR2Rp) # 1.886397 at T=#27 -> 299K (26C)
+RpO  <- 26
+RpL  <- 17
+RpH  <- 27
+
+BIV$RpA.stressed <- NA
+BIV$RpA.stressed[BIV$StatA03cmU <   RpL] <- -2
+BIV$RpA.stressed[BIV$StatA03cmU >=  RpL    & BIV$StatA03cmU <= (RpO-1)] <- -1 
+BIV$RpA.stressed[BIV$StatA03cmU >= (RpO-1) & BIV$StatA03cmU <= (RpO+1)] <-  0 
+BIV$RpA.stressed[BIV$StatA03cmU >  (RpO+1) & BIV$StatA03cmU <= RpH]     <-  1
+BIV$RpA.stressed[BIV$StatA03cmU >   RpH] <-  2
+table(BIV$RpA.stressed)
+
+BIV$RpB.stressed <- NA
+BIV$RpB.stressed[BIV$StatB03cmU <   RpL] <- -2
+BIV$RpB.stressed[BIV$StatB03cmU >=  RpL    & BIV$StatB03cmU <= (RpO-1)] <- -1 
+BIV$RpB.stressed[BIV$StatB03cmU >= (RpO-1) & BIV$StatB03cmU <= (RpO+1)] <-  0 
+BIV$RpB.stressed[BIV$StatB03cmU >  (RpO+1) & BIV$StatB03cmU <= RpH]     <-  1
+BIV$RpB.stressed[BIV$StatB03cmU >   RpH] <-  2
+table(BIV$RpB.stressed)
+
+BIV$RpC.stressed <- NA
+BIV$RpC.stressed[BIV$StatD03cmU <   RpL] <- -2
+BIV$RpC.stressed[BIV$StatD03cmU >=  RpL    & BIV$StatD03cmU <= (RpO-1)] <- -1 
+BIV$RpC.stressed[BIV$StatD03cmU >= (RpO-1) & BIV$StatD03cmU <= (RpO+1)] <-  0 
+BIV$RpC.stressed[BIV$StatD03cmU >  (RpO+1) & BIV$StatD03cmU <= RpH]     <-  1
+BIV$RpC.stressed[BIV$StatD03cmU >   RpH] <-  2
+table(BIV$RpC.stressed)
+
+
+## Deep endobenthos
+# Ma (29)
+MaOm <- max(TR2Ma) # 1.631560 at T=#30 -> 302K (29C)
+MaO  <- 29
+MaL  <-  5
+MaH  <- 33
+
+BIV$MaA.stressed <- NA
+BIV$MaA.stressed[BIV$StatA15cmU <   MaL] <- -2
+BIV$MaA.stressed[BIV$StatA15cmU >=  MaL    & BIV$StatA15cmU <= (MaO-1)] <- -1 
+BIV$MaA.stressed[BIV$StatA15cmU >= (MaO-1) & BIV$StatA15cmU <= (MaO+1)] <-  0 
+BIV$MaA.stressed[BIV$StatA15cmU >  (MaO+1) & BIV$StatA15cmU <= MaH]     <-  1
+BIV$MaA.stressed[BIV$StatA15cmU >   MaH] <-  2
+table(BIV$MaA.stressed)
+
+BIV$MaB.stressed <- NA
+BIV$MaB.stressed[BIV$StatB15cmU <   MaL] <- -2
+BIV$MaB.stressed[BIV$StatB15cmU >=  MaL    & BIV$StatB15cmU <= (MaO-1)] <- -1 
+BIV$MaB.stressed[BIV$StatB15cmU >= (MaO-1) & BIV$StatB15cmU <= (MaO+1)] <-  0 
+BIV$MaB.stressed[BIV$StatB15cmU >  (MaO+1) & BIV$StatB15cmU <= MaH]     <-  1
+BIV$MaB.stressed[BIV$StatB15cmU >   MaH] <-  2
+table(BIV$MaB.stressed)
+
+BIV$MaC.stressed <- NA
+BIV$MaC.stressed[BIV$StatD15cmU <   MaL] <- -2
+BIV$MaC.stressed[BIV$StatD15cmU >=  MaL    & BIV$StatD15cmU <= (MaO-1)] <- -1 
+BIV$MaC.stressed[BIV$StatD15cmU >= (MaO-1) & BIV$StatD15cmU <= (MaO+1)] <-  0 
+BIV$MaC.stressed[BIV$StatD15cmU >  (MaO+1) & BIV$StatD15cmU <= MaH]     <-  1
+BIV$MaC.stressed[BIV$StatD15cmU >   MaH] <-  2
+table(BIV$MaC.stressed)
+
+
+# Mb
+MbOm <- max(TR2Mb) # 3.798177 at T=#15 -> 287K (14C)
+MbO  <- 14
+MbL  <-  0
+MbH  <- 17
+
+BIV$MbA.stressed <- NA
+BIV$MbA.stressed[BIV$StatA15cmU <   MbL] <- -2
+BIV$MbA.stressed[BIV$StatA15cmU >=  MbL    & BIV$StatA15cmU <= (MbO-1)] <- -1 
+BIV$MbA.stressed[BIV$StatA15cmU >= (MbO-1) & BIV$StatA15cmU <= (MbO+1)] <-  0 
+BIV$MbA.stressed[BIV$StatA15cmU >  (MbO+1) & BIV$StatA15cmU <= MbH]     <-  1
+BIV$MbA.stressed[BIV$StatA15cmU >   MbH] <-  2
+table(BIV$MbA.stressed)
+
+BIV$MbB.stressed <- NA
+BIV$MbB.stressed[BIV$StatB15cmU <   MbL] <- -2
+BIV$MbB.stressed[BIV$StatB15cmU >=  MbL    & BIV$StatB15cmU <= (MbO-1)] <- -1 
+BIV$MbB.stressed[BIV$StatB15cmU >= (MbO-1) & BIV$StatB15cmU <= (MbO+1)] <-  0 
+BIV$MbB.stressed[BIV$StatB15cmU >  (MbO+1) & BIV$StatB15cmU <= MbH]     <-  1
+BIV$MbB.stressed[BIV$StatB15cmU >   MbH] <-  2
+table(BIV$MbB.stressed)
+
+BIV$MbC.stressed <- NA
+BIV$MbC.stressed[BIV$StatD15cmU <   MbL] <- -2
+BIV$MbC.stressed[BIV$StatD15cmU >=  MbL    & BIV$StatD15cmU <= (MbO-1)] <- -1 
+BIV$MbC.stressed[BIV$StatD15cmU >= (MbO-1) & BIV$StatD15cmU <= (MbO+1)] <-  0 
+BIV$MbC.stressed[BIV$StatD15cmU >  (MbO+1) & BIV$StatD15cmU <= MbH]     <-  1
+BIV$MbC.stressed[BIV$StatD15cmU >   MbH] <-  2
+table(BIV$MbC.stressed)
+
+
+## END OF SCRIPT (30/8/22; 09:30)
+#################################
+```

@@ -1,0 +1,612 @@
+# required packages
+```{r}
+# devtools::install_github("dynamic-R/TempSED", depend=TRUE, build.vignettes=TRUE)
+# require(sedTemp)
+require(TempSED)
+require(deSolve)
+require(rootSolve)
+require(ReacTran) # for setup.grid.1D function
+require(readxl) # for reading sediment temperature sensor xlsx data
+require(dplyr)
+require(stringr)
+require(ncdf4) #for dealing with netCDF data (metero data)
+SL <- Sys.getlocale("LC_TIME")
+Sys.setlocale("LC_TIME", "C")
+
+require(plot3D)
+
+```
+
+# 1. Data processing
+```{r}
+#sed T observation
+# save(Mok_data, file = "../data/DataQing/Mok_data.rda")
+# your working directory
+wd <- "C:\\Users\\qzhan\\OneDrive - NIOZ\\Attachments\\01_LTER-LIFE\\04_Bivalve\\Modelling\\Heatwave_bivalve"
+load(paste0(wd, "/Data/Mok_data.rda"))
+
+#weather forcings
+# save(ForcingsDeKooyAirport, file = "../data/DataQing/ForcingsDeKooyAirport.rda")
+load(paste0(wd, "/Data/ForcingsDeKooyAirport.rda"))
+
+#water forcings from RWS
+# save(WaterForcingsRWSWaddenSea, file = "../data/DataQing/WaterForcingsRWSWaddenSea.rda")
+load(paste0(wd, "/Data/WaterForcingsRWSWaddenSea.rda"))
+```
+
+## 2.1 sediment temperature data
+```{r}
+# Function to create the observation data from SedTempDataWaddenSea
+create_observation_data <- function(data, station_name, depth) {
+  # Filter the data by the given station and depth
+  station_data <- subset(data, Station == station_name & Depth == depth)
+  
+  # Create a new data frame with the 'Time' and 'Temperature' columns
+  obs_data <- data.frame(
+    Time = station_data$DateTime,         # Use DateTime as Time
+    Temperature = station_data$Temperature  # Use Temperature as Temperature
+  )
+  
+  # Return the resulting data frame
+  return(obs_data)
+}
+
+
+# Create Obsdat_Mokbai from SedTempDataWaddenSea
+Obsdat_A_3cm <- create_observation_data(Mok_data, "A", 3)
+Obsdat_A_15cm <- create_observation_data(Mok_data, "A", 15)
+
+# Create Obsdat_Mokbai from SedTempDataWaddenSea
+Obsdat_B_3cm <- create_observation_data(Mok_data, "B", 3)
+Obsdat_B_15cm <- create_observation_data(Mok_data, "B", 15)
+
+# Obsdat_D_3cm <- create_observation_data(Mok_data, "D", 3)
+# Obsdat_D_15cm <- create_observation_data(Mok_data, "D", 15)
+
+# View the first few rows of Obsdat_Vvk and Obsdat_Balgzand
+head(Obsdat_A_3cm)
+head(Obsdat_B_3cm)
+# head(Obsdat_D_3cm)
+
+head(Obsdat_A_15cm)
+head(Obsdat_B_15cm)
+# head(Obsdat_D_15cm)
+```
+
+## 2.2 sediment porosity:
+```{r}
+require(ReacTran)
+# Define porosity function 
+## Muddy sediment
+porfun <- function(x) return(0.45 + (1-0.45) * exp(-x*50))
+
+## Sandy sediment
+# porfun <- function(x) return(0.35 + (1-0.35) * exp(-x*300))
+
+length.z <- 10
+dz.1     <- 1e-4
+
+Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z)
+por      <- setup.prop.1D(func=porfun, grid=Grid)
+
+plot(por, grid=Grid, xyswap=TRUE, xlim=c(0,1), ylim=c(0.1,0), xlab="Porosity", ylab="Depth(m)", t="l"); abline(h=0, lty=2)
+
+```
+
+## 2.3 Water temperature processing
+```{r}
+# --- Generate in-memory fTwater_*.wad data frames from Mok_data ---
+generate_fTwater_data <- function(Mok_data) {
+  library(dplyr)
+  
+  stopifnot(all(c("Station", "Depth", "Second", "Temperature") %in% names(Mok_data)))
+  
+  # Normalize time to start at 0
+  Mok_data <- Mok_data %>%
+    mutate(Second = Second - min(Second, na.rm = TRUE))
+  
+  # Function to extract by station
+  extract_station <- function(station) {
+    Mok_data %>%
+      filter(Station == station, Depth == 2) %>%
+      arrange(Second) %>%
+      select(Second, Temperature)
+  }
+  
+  # Create each data frame
+  fTwater_A.wad <- extract_station("A")
+  fTwater_B.wad <- extract_station("B")
+  fTwater_D.wad <- extract_station("D")
+  
+  # Return all as a named list (and keep also as objects in global env)
+  assign("fTwater_A.wad", fTwater_A.wad, envir = .GlobalEnv)
+  assign("fTwater_B.wad", fTwater_B.wad, envir = .GlobalEnv)
+  assign("fTwater_D.wad", fTwater_D.wad, envir = .GlobalEnv)
+  
+  message("✅ Created in-memory data frames: fTwater_A.wad, fTwater_B.wad, fTwater_D.wad")
+  
+  invisible(list(A = fTwater_A.wad,
+                 B = fTwater_B.wad,
+                 D = fTwater_D.wad))
+}
+
+# ---- Example usage ----
+result <- generate_fTwater_data(Mok_data)
+
+# Access them directly:
+head(fTwater_A.wad) # shallow
+head(fTwater_B.wad) # middle
+head(fTwater_D.wad) # deep
+
+```
+
+## 2.4 Water level processing
+```{r}
+# Set the origin date-time
+origin <- as.POSIXct("2018-08-07 00:00:00", tz = "CET")
+
+# Function to process the water level data for Vvk or Balgzand and return only the required columns
+process_water_level <- function(data, depth_offset) {
+  # Convert Time to seconds
+  data$Second <- as.double(julian(data$Time, origin = origin) * 86400)
+  
+  # Adjust water level values based on the station (Vvk or Balgzand)
+  data$H.m <- (data$NUMERIEKEWAARDE - depth_offset) / 100
+  
+  # Replace negative water level values with 0
+  data$H.m[data$H.m < 0] <- 0
+  
+  # Keep only the columns 'Second' and 'H.m'
+  data <- data[, c("Second", "H.m")]
+  
+  return(data)
+}
+
+# Process the data
+#2. use Den Helder, veersteiger water H
+# For A station (shallow)
+fHeight_A_Den.wad <- process_water_level(WaterForcingsRWSWaddenSea$`Den Helder, veersteiger`$WaterLevel, -9)
+
+# # For B station (middle)
+fHeight_B_Den.wad <- process_water_level(WaterForcingsRWSWaddenSea$`Den Helder, veersteiger`$WaterLevel, -33)
+
+# # For D station (deep)
+# fHeight_D_Den.wad <- process_water_level(WaterForcingsRWSWaddenSea$`Den Helder, veersteiger`$WaterLevel, -74)
+
+
+# View the processed data
+
+
+head(fHeight_A_Den.wad)
+head(fHeight_B_Den.wad)
+# head(fHeight_D_Den.wad)
+
+# meteorological forcings
+fWind_WaS.wad      <-   ForcingsDeKooyAirport[,c("Second", "windSpeed")]
+fRad_WaS.wad       <-   ForcingsDeKooyAirport[,c("Second", "radiation")]
+fTair_WaS.wad      <-   ForcingsDeKooyAirport[,c("Second", "airTemperature")]
+fPair_WaS.wad      <-   ForcingsDeKooyAirport[,c("Second", "airPressure")]
+fHumidity_WaS.wad  <-   ForcingsDeKooyAirport[,c("Second", "airHumidity")]
+fCloud_WaS.wad     <-   ForcingsDeKooyAirport[,c("Second", "cloudCover")]
+```
+
+## 2.5 Output format
+```{r}
+## Output hourly
+find_time_comparison_function <- function(forcing_list) {
+  # Initialize variables to store the latest start time and earliest end time
+  latest_start_time <- -Inf
+  earliest_end_time <- Inf
+  latest_start_function <- NULL
+  earliest_end_function <- NULL
+  
+  # Loop over the list of functions and compare start and end times
+  for (function_name in names(forcing_list)) {
+    df <- forcing_list[[function_name]]
+    
+    # Get the first and last value of the "Second" column, first column
+    first_second <- min(df[,1])
+    last_second <- max(df[,1])
+    
+    # Check if this function starts later than the current latest start time
+    if (first_second > latest_start_time) {
+      latest_start_time <- first_second
+      latest_start_function <- function_name
+    }
+    
+    # Check if this function ends earlier than the current earliest end time
+    if (last_second < earliest_end_time) {
+      earliest_end_time <- last_second
+      earliest_end_function <- function_name
+    }
+  }
+  
+  # Return the result as a named list
+  list(
+    LatestStartFunction = latest_start_function,
+    FirstSecond = latest_start_time,
+    EarliestEndFunction = earliest_end_function,
+    LastSecond = earliest_end_time
+  )
+}
+
+find_time_comparison_function(forcing_functions) 
+# so we should start from 7200 seconds to 1208700 seconds
+
+# --- Convert each forcing .wad object to numeric double matrix (in place) ---
+
+# Helper: convert data.frame to numeric matrix with 2 columns (time, value)
+to_forcing_matrix <- function(df) {
+  stopifnot(ncol(df) >= 2)
+  m <- cbind(
+    as.numeric(df[[1]]),
+    as.numeric(df[[2]])
+  )
+  storage.mode(m) <- "double"
+  m
+}
+
+# List all forcing variable names you want to process
+# For station A
+forcing_names <- c(
+  "fPair_WaS.wad",
+  "fTair_WaS.wad",
+  "fHeight_A_Den.wad",
+  "fTwater_A.wad",
+  "fHeight_B_Den.wad",
+  "fTwater_B.wad",
+  "fHumidity_WaS.wad",
+  "fRad_WaS.wad",
+  "fWind_WaS.wad",
+  "fCloud_WaS.wad"
+)
+
+# Loop through and overwrite each variable in the global environment
+for (nm in forcing_names) {
+  if (exists(nm, envir = .GlobalEnv)) {
+    obj <- get(nm, envir = .GlobalEnv)
+    if (is.data.frame(obj)) {
+      assign(nm, to_forcing_matrix(obj), envir = .GlobalEnv)
+      message("✅ Converted to double matrix: ", nm)
+    } else {
+      message("⚠️ Skipped (not a data.frame): ", nm)
+    }
+  } else {
+    message("⚠️ Object not found: ", nm)
+  }
+}
+
+# ✅ After this, each e.g. fTwater_A.wad, fRad_WaS.wad, etc. is now:
+# num [1:..., 1:2]  (double matrix)
+# ready for:  forcings = list(fWaterTemp = fTwater_A.wad, ...)
+
+```
+
+## 2.6 Standard forcing object
+```{r}
+# Example usage with the forcing functions list
+forcing_functions <- list(
+  pair = fPair_WaS.wad,
+  tair = fTair_WaS.wad,
+  hwater = fHeight_A_Den.wad,
+  twater = fTwater_A.wad, # instead of den Helder RWS WT, we used sensor measured interface water temperature at + 2cm
+  rh = fHumidity_WaS.wad,
+  rad = fRad_WaS.wad,
+  wind = fWind_WaS.wad,
+  cloud = fCloud_WaS.wad
+)
+
+base_forcing <- forcing_functions
+
+```
+
+# 2. Temp simulation using TempSED
+## 2.1 Define model parameters
+```{r}
+# parameters
+emAir     = 0.8        # [-]        emissivity of air
+emSed     = 0.95*1       # [-]        emissivity of sediment
+stanton   = 0.001*1      # [-]        transfer coeff for sensible heat
+dalton    = 0.0014*1     # [-]        transfer coeff for latent heat
+dependencyT = FALSE
+densWater = 1024       # [kg/m3]    seawater density
+densSolid = 2500       # [kg/m3]    sediment dry density
+cpWater   = 3994       # [J/kg/dgC] specific heat capacity water
+cpSolid   = 700       # [J/kg/dgC] specific heat capacity solid (dry sediment)* 
+#518-907 
+#the higher, model value in winter will be higher, in summer will be lower
+#not as sensitive as tcsolid, 700-900 like the same
+#850 is too high, 700 will make the summer deep sediment fit good
+tcWater   = 0.6        # [W/m/dg]   thermal conductivity of water 
+tcSolid   = 7        # [W/m/dg]   thermal conductivity of solid* #1.68-19.21
+#the higher, model value will be lower in winter, higher in summer #6-7 is best, and it influences deeper layers the most)
+albedoWater = 0.05     # [-] part light reflected by water
+albedoSed = 0.1       # [-] part light reflected by sediment*(0.1-0.3, no big difference)
+#make it 0.3, radiation into sediment would be too low, modeled T would be too low
+kdWater   = 1        # [/m] light attenuation coefficient water (1-25/m in RT13)
+#from 1 to 25, no difference at all?
+kdSed     = 1000      # [/m] light attenuation coefficient (bulk) sediment(no difference from 1000 to 5000)
+#make it 10000, the effect is same with increasing albedoSed, winter overshooting is still there, but summer is too low
+parms = list(
+      cp_solid = cpSolid,
+      tc_solid = tcSolid,
+      em_air = emAir,
+      dalton = dalton,
+      stanton = stanton,
+      albedo_sediment = albedoSed,
+      kd_water = kdWater,
+      albedo_water = albedoWater)
+
+times  <- seq(from=7200, to=1208700, by=3600) # 14 days, hourly
+```
+
+## 2.2 Test run for station A
+```{r}
+run_sediment_model <- function(
+  forcing,
+  times,
+  grid,
+  porfun,
+  parms,
+  sedpos = c(0, 0.03, 0.15),
+  T_ini = 20,
+  dependencyT = FALSE
+) {
+
+  TempSED_run1D(
+    z_max = max(grid$x),
+    dz_1  = grid$dx[1],
+    Grid  = grid,
+    T_ini = T_ini,
+    times = times,
+    porosity = porfun,
+    dependency_on_T = dependencyT,
+    parms = parms,
+
+    f_Pressure        = forcing$pair,
+    f_Airtemperature  = forcing$tair,
+    f_Waterheight     = forcing$hwater,
+    f_Watertemperature= forcing$twater,
+    f_Qrel            = forcing$rh,
+    f_Solarradiation  = forcing$rad,
+    f_Windspeed       = forcing$wind,
+    f_Cloudiness      = forcing$cloud,
+
+    sedpos = sedpos
+  )
+}
+
+# Example test run
+test_output <- run_sediment_model(
+      forcing = base_forcing,
+      times   = times,
+      grid    = Grid,
+      porfun  = porfun,
+      parms   = parms
+    )
+```
+
+# 3. Run model for different climate scenarios
+## 3.1 Scenario layer (KNMI scenarios)
+```{r}
+# Generic forcing modifiers
+add_delta <- function(mat, delta) {
+  mat[,2] <- mat[,2] + delta
+  mat
+}
+
+scale_factor <- function(mat, factor) {
+  mat[,2] <- mat[,2] * factor
+  mat
+}
+
+phase_shift <- function(mat, hours) {
+  shift <- hours * 3600
+  mat[,1] <- mat[,1] + shift
+  mat
+}
+
+# KNMI-style scenarios definition:
+knmi_scenarios <- list(
+  baseline = list(
+    dTair = 0,
+    dTwater = 0,
+    rad_factor = 1,
+    wind_factor = 1
+  ),
+  WH2050 = list(
+    dTair = 3,
+    dTwater = 2,
+    rad_factor = 1.05,
+    wind_factor = 0.95
+  ),
+  GH2100 = list(
+    dTair = 5,
+    dTwater = 4,
+    rad_factor = 1.10,
+    wind_factor = 0.90
+  )
+)
+
+apply_scenario <- function(forcing, scen) {
+
+  forcing$tair   <- add_delta(forcing$tair,   scen$dTair)
+  forcing$twater <- add_delta(forcing$twater, scen$dTwater)
+  forcing$rad    <- scale_factor(forcing$rad, scen$rad_factor)
+  forcing$wind   <- scale_factor(forcing$wind,scen$wind_factor)
+
+  forcing
+}
+
+```
+
+## 3.2 minimal Shinny app 
+```{r}
+library(shiny)
+
+length.z <- 10
+dz.1     <- 1e-4
+times  <- seq(from=7200, to=1208700, by=3600) # 14 days, hourly
+# times <- seq(0, 7*24*3600, by=3600) # one week, hourly
+Grid = setup.grid.1D(N = 100, dx.1 = dz.1, L = length.z)
+
+ui <- fluidPage(
+  titlePanel("Sediment temperature & heatwave scenarios – Wadden Sea"),
+
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("scenario", "KNMI scenario",
+                  choices = names(knmi_scenarios)),
+
+      sliderInput("dTair", "Δ Air temperature (°C)", -2, 6, 0),
+      sliderInput("dTwater", "Δ Water temperature (°C)", -2, 6, 0),
+      sliderInput("tshift", "Tidal phase shift (h)", -6, 6, 0),
+
+      selectInput("depth", "Depth",
+                  choices = c("3 cm" = "Tsed_0.03",
+                              "15 cm" = "Tsed_0.15"))
+    ),
+
+    mainPanel(
+      plotOutput("tempPlot", height = "400px")
+    )
+  )
+)
+
+server <- function(input, output) {
+
+  model_out <- reactive({
+
+    scen <- knmi_scenarios[[input$scenario]]
+    scen$dTair   <- scen$dTair   + input$dTair
+    scen$dTwater <- scen$dTwater + input$dTwater
+
+    forc <- apply_scenario(base_forcing, scen)
+    forc$hwater <- phase_shift(forc$hwater, input$tshift)
+
+    run_sediment_model(
+      forcing = forc,
+      times   = times,
+      grid    = Grid,
+      porfun  = porfun,
+      parms   = parms
+    )
+  })
+
+  output$tempPlot <- renderPlot({
+    out <- model_out()
+    plot(out[,"time"]/3600,
+         out[, input$depth],
+         type="l", lwd=2,
+         xlab="Time (h)",
+         ylab="Sediment temperature (°C)")
+  })
+}
+
+shinyApp(ui, server)
+
+```
+
+# 4 Arrhenius physiologiy code
+
+## 4.1 species parameters
+```{r}
+species_pars <- data.frame(
+  species = c("ce","cg","ed","ma","mb","me","mg","oe","rp"),
+  name = c("Cerastoderma edule","Crassostrea gigas","Ensis directus",
+           "Mya arenaria","Macoma balthica","Mytilus edulis",
+           "Mytilus galloprovincialis","Ostrea edulis",
+           "Ruditapes philippinarum"),
+  TA  = c(5800,5800,6000,7051,5800,5800,5000,5000,6071),
+  TL  = c(278,281,278,278,273,275,275,286,290),
+  TH  = c(306,300,306,306,290,296,296,303,300),
+  TAL = c(51154,75000,51154,1300000,6700000,45430,45430,23000,30424),
+  TAH = c(47126,30000,17500,30117,49368,31376,31376,55610,299859)
+)
+
+
+```
+
+## 4.2 Arrhenius function
+```{r}
+arrhenius_rate <- function(T, pars, Tref = 293) {
+  with(pars, {
+    exp(TA/Tref - TA/T) *
+      (1 + exp(TAL/Tref - TAL/TL) + exp(TAH/TH - TAH/Tref)) /
+      (1 + exp(TAL/T - TAL/TL) + exp(TAH/TH - TAH/T))
+  })
+}
+
+
+```
+
+## 4.3 Temp response curves
+```{r}
+TempRange <- seq(273, 320, by = 1)
+
+TR_curves <- lapply(1:nrow(species_pars), function(i) {
+  arrhenius_rate(TempRange, species_pars[i,])
+})
+names(TR_curves) <- species_pars$species
+
+```
+
+## 4.4 Plot Temp response curves
+```{r}
+plot(TempRange - 273, TR_curves[[1]], type = "l", lwd = 2,
+     xlab = "Temperature (°C)", ylab = "Relative rate", ylim = c(0, 4))
+for (i in 2:length(TR_curves)) {
+  lines(TempRange - 273, TR_curves[[i]], lwd = 2, col = i)
+}
+legend("topright", legend = species_pars$name, col = 1:length(TR_curves), lwd = 2)
+```
+
+## 4.5 Apply physiology to sediment temperature 
+```{r}
+library(tidyr)
+library(dplyr)
+data.path <- paste(getwd(), "/Data/", sep = "")
+BIV <- read.table(file = paste(data.path, "cp_2022.08.27_MOK2018.txt", sep = ""), header = TRUE, dec = ",")
+
+temp_long <- BIV %>%
+  select(DayTime,
+         StatA02cmA, StatA03cmU, StatA15cmU,
+         StatB02cmA, StatB03cmU, StatB15cmU,
+         StatD02cmA, StatD03cmU, StatD15cmU) %>%
+  pivot_longer(-DayTime,
+               names_to = "station_depth",
+               values_to = "Temp_C") %>%
+  mutate(
+    Temp_K = Temp_C + 273,
+    station = substr(station_depth, 5, 5),
+    depth   = case_when(
+      grepl("02cmA", station_depth) ~ "surface",
+      grepl("03cmU", station_depth) ~ "shallow",
+      grepl("15cmU", station_depth) ~ "deep"
+    )
+  )
+
+```
+
+## 4.6 Calculate physiologicalrates for each species
+```{r}
+phys_rates <- function(temp_df, species_code) {
+  pars <- species_pars %>% filter(species == species_code)
+
+  temp_df %>%
+    mutate(
+      FR = arrhenius_rate(Temp_K, pars)
+    )
+}
+rates_ce <- phys_rates(temp_long, "ce")
+rates_cg <- phys_rates(temp_long, "cg")
+rates_ed <- phys_rates(temp_long, "ed")
+rates_ma <- phys_rates(temp_long, "ma")
+rates_mb <- phys_rates(temp_long, "mb")
+rates_me <- phys_rates(temp_long, "me")
+rates_mg <- phys_rates(temp_long, "mg")
+rates_oe <- phys_rates(temp_long, "oe")
+rates_rp <- phys_rates(temp_long, "rp")
+
+plot(rates_ce)
+```
