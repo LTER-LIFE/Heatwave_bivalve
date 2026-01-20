@@ -1,0 +1,65 @@
+library(devtools)
+load_all("~/ricky_proj/TempSED")
+require(ReacTran)
+require(pracma)
+library(parallel)
+
+# === Load Data ===
+load("TempSED/data/obs2020.rda")
+fWind.wad2020      <-   obs2020[,c("Second", "windSpeed")]
+fRad.wad2020       <-   obs2020[,c("Second", "radiation")]
+fTair.wad2020      <-   obs2020[,c("Second", "airTemperature")]
+fPair.wad2020      <-   obs2020[,c("Second", "airPressure")]
+fHumidity.wad2020  <-   obs2020[,c("Second", "airHumidity")]
+fCloud.wad2020     <-   obs2020[,c("Second", "cloudCover")]
+
+load("TempSED/data/out_WD_0.002_2020.rda")
+load("TempSED/data/out_WT_0.002_2020.rda")
+
+load("TempSED/data/sed_pars2020.rda")
+load("TempSED/data/run_indices2020.rda")
+load("TempSED/data/Temp.ini_2020_fixedDeepT.rda")
+
+
+source("run_ensemble_2020.R")
+
+# === Universal Parameters ===
+z_max <- 10
+dz_1     <- 1e-4
+Grid = setup.grid.1D(N = 100, dx.1 = dz_1, L = z_max)
+
+parms <- list(
+  em_air = 0.8,
+  em_sediment = 0.95,
+  stanton = 0.001,
+  dalton = 0.0014,
+  density_water = 1024,
+  density_solid = 2500,
+  cp_water = 3994,
+  tc_water = 0.6,
+  tc_solid = 7,
+  albedo_water = 0.05,
+  kd_water = 1,
+  kd_sediment = 1000
+)
+
+# === Model Run ===
+output_dir <- "./output_dir/multicore/output_list_OS_2020_fixedDeepT_2yr"
+#dir.create("../data/output_list_OS_2020_fixedDeepT_2yr", showWarnings = FALSE)
+
+if(!dir.exists(output_dir)) dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+
+seconds_per_year <- 365 * 24 * 3600
+times_1yr <- seq(from = 3600, by = 3600, length.out = 8760)
+forcing_times_1yr <- seq(from = 3600, by = 600, length.out = 52560)
+
+delta_U_threshold <- 0.001
+
+run_indices_sub = run_indices2020[1:3114]
+
+
+
+cores <- as.numeric(Sys.getenv("SLURM_CPUS_PER_TASK"))
+out <- mclapply(seq_along(run_indices_sub), multicore_ensemble, mc.cores = cores)
+
