@@ -1,3 +1,33 @@
+#####
+
+# Configuration (do not containerize this cell)
+param_minio_endpoint = "scruffy.lab.uvalight.net:9000"
+param_minio_user_prefix = "zhanqing2016@gmail.com"  # Your personal folder in the naa-vre-user-data bucket in MinIO
+secret_minio_access_key = "sFmE1jsm5hjJBBGh5RBL"
+secret_minio_secret_key = "pczCG6FRpXQEtad7lAvXv00iCYFd5Dpa1g8GOWzR"
+
+# Access MinIO files
+install.packages("aws.s3")
+library("aws.s3")
+Sys.setenv("AWS_S3_ENDPOINT" = param_minio_endpoint,
+           "AWS_DEFAULT_REGION" = param_minio_region,
+           "AWS_ACCESS_KEY_ID" = secret_minio_access_key,
+           "AWS_SECRET_ACCESS_KEY" = secret_minio_secret_key)
+
+# List existing buckets: get a list of all available buckets
+bucketlist()
+
+# List files in bucket: get a list of files in a given bucket. For bucket `naa-vre-user-data`, only list files in your personal folder
+get_bucket_df(bucket="naa-vre-user-data", prefix=paste0(param_minio_user_prefix, "/"))
+
+# Upload file to bucket: uploads `myfile_local.csv` to your personal folder on MinIO as `myfile.csv`
+put_object(bucket="naa-vre-user-data", file="myfile_local.csv", object=paste0(param_minio_user_prefix, "/myfile.csv"))
+
+# Download file from bucket: download `myfile.csv` from your personal folder on MinIO and save it locally as `myfile_downloaded.csv`
+save_object(bucket="naa-vre-user-data", object=paste0(param_minio_user_prefix, "/myfile.csv"), file="myfile_downloaded.csv")
+
+########
+
 library(devtools)
 load_all("~/ricky_proj/TempSED")
 require(ReacTran)
