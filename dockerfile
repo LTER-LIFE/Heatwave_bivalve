@@ -9,11 +9,13 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install R packages needed to install from GitHub
-RUN R -e "install.packages('remotes', repos='https://cloud.r-project.org')"
+RUN R -e "install.packages(c('remotes', 'devtools'), repos='https://cloud.r-project.org')"
 
-# Install your GitHub R package
-# (replace USERNAME and PACKAGENAME)
-RUN R -e "remotes::install_github('USERNAME/PACKAGENAME')"
+# Install required R packages for TempSED
+RUN R -e "install.packages(c('deSolve', 'rootSolve', 'ReacTran', 'plot3D'), repos='https://cloud.r-project.org')"
+
+# Install TempSED package from GitHub
+RUN R -e "library(devtools); install_github('TempSED/TempSED', dependencies=TRUE)"
 
 # Set working directory
 WORKDIR /work
