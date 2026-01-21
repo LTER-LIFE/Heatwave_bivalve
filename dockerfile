@@ -1,21 +1,39 @@
 FROM rocker/r-base:4.3.2
 
-# System dependencies (add more if your package needs them)
+## ---- system dependencies (adjust if needed) ----
 RUN apt-get update && apt-get install -y \
     git \
     libcurl4-openssl-dev \
     libssl-dev \
     libxml2-dev \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install R packages needed to install from GitHub
-RUN R -e "install.packages(c('remotes', 'devtools'), repos='https://cloud.r-project.org')"
+## ---- working directory ----
+WORKDIR /opt
 
-# Install required R packages for TempSED
-RUN R -e "install.packages(c('deSolve', 'rootSolve', 'ReacTran', 'plot3D'), repos='https://cloud.r-project.org')"
+## ---- clone tempSED from GitHub ----
+RUN git clone https://github.com/TempSED/TempSED.git /opt/TempSED
 
-# Install TempSED package from GitHub
-RUN R -e "library(devtools); install_github('TempSED/TempSED', dependencies=TRUE)"
+## ---- clean unneeded files from TempSED source ----
+# Remove vignettes and build directories to save space
+RUN rm -rf /opt/TempSED/vignettes
+RUN rm -rf /opt/TempSED/build
+
+# Install all R packages in a single command
+RUN R -e "install.packages(c('remotes', 'deSolve', 'rootSolve', 'ReacTran', 'plot3D'), repos='https://cloud.r-project.org', dependencies=TRUE)"
+
+## ---- install TempSED from local source ----
+RUN R CMD build --no-build-vignettes /opt/TempSED
+RUN R CMD INSTALL TempSED_*.tar.gz
+
+## ---- VERIFY installation ----
+RUN R -e "\
+cat('Checking TempSED installation...\\n'); \
+library(TempSED); \
+cat('TempSED loaded successfully\\n'); \
+cat('Installed at:\\n'); \
+print(find.package('TempSED'))"
 
 # Set working directory
 WORKDIR /work
