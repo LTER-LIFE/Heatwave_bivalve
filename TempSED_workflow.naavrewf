@@ -1,0 +1,178 @@
+{
+  "chart": {
+    "offset": {
+      "x": -342.27,
+      "y": 192.03
+    },
+    "scale": 0.901,
+    "nodes": {
+      "dfe8dee0-492b-4f2f-a241-d27e7bbb24ad": {
+        "id": "dfe8dee0-492b-4f2f-a241-d27e7bbb24ad",
+        "position": {
+          "x": 889.0864317425082,
+          "y": 308.51276359600445
+        },
+        "orientation": 0,
+        "type": "workflow-cell",
+        "ports": {
+          "run_indices_sub": {
+            "id": "run_indices_sub",
+            "type": "right",
+            "properties": {
+              "color": "#2d7786",
+              "parentNodeType": "workflow-cell"
+            },
+            "position": {
+              "x": 252,
+              "y": 30
+            }
+          }
+        },
+        "properties": {
+          "cell": {
+            "url": "https://beta.naavre.net/naavre-catalogue-service/workflow-cells/8d0378fd-cf43-4cbb-90eb-fdfe4b9b7f36/",
+            "owner": "zhanqing2016@gmail.com",
+            "virtual_lab": "waddenzee-proto-dt",
+            "shared_with_scopes": [],
+            "shared_with_users": [],
+            "base_container_image": {
+              "build": "ghcr.io/naavre/flavors/naavre-fl-lter-life-wadden-cell-build:v0.1.3",
+              "runtime": "ghcr.io/naavre/flavors/naavre-fl-lter-life-wadden-cell-runtime:v0.1.3"
+            },
+            "dependencies": [
+              {
+                "name": "aws.s3",
+                "module": "",
+                "asname": null
+              }
+            ],
+            "inputs": [],
+            "outputs": [
+              {
+                "name": "run_indices_sub",
+                "type": "list"
+              }
+            ],
+            "confs": [],
+            "params": [],
+            "secrets": [
+              {
+                "name": "secret_minio_access_key",
+                "type": "str"
+              },
+              {
+                "name": "secret_minio_secret_key",
+                "type": "str"
+              }
+            ],
+            "title": "c1-tempsed-data-zhanqing2016-gmail-com",
+            "description": "c1-tempsed-data-zhanqing2016-gmail-com",
+            "created": "2026-01-23T09:50:33.351097Z",
+            "modified": "2026-01-23T09:50:33.597010Z",
+            "version": 4,
+            "container_image": "ghcr.io/naavre/cells-vl-waddenzee-proto-dt/c1-tempsed-data-zhanqing2016-gmail-com:cb6592a",
+            "kernel": "IRkernel",
+            "source_url": "https://github.com/NaaVRE/cells-vl-waddenzee-proto-dt/tree/eba318355a3624383c19393fbfb0f6d6c34a1c79/c1-tempsed-data-zhanqing2016-gmail-com",
+            "is_draft": false,
+            "next_version": null
+          }
+        },
+        "size": {
+          "width": 252,
+          "height": 61
+        }
+      },
+      "e90ff44e-83dc-4d95-b8d4-2a5dc747152d": {
+        "id": "e90ff44e-83dc-4d95-b8d4-2a5dc747152d",
+        "position": {
+          "x": 1308.620283018868,
+          "y": 308.51276359600445
+        },
+        "orientation": 0,
+        "type": "workflow-cell",
+        "ports": {
+          "run_indices_sub": {
+            "id": "run_indices_sub",
+            "type": "left",
+            "properties": {
+              "color": "#2d7786",
+              "parentNodeType": "workflow-cell"
+            },
+            "position": {
+              "x": -2,
+              "y": 30
+            }
+          }
+        },
+        "properties": {
+          "cell": {
+            "url": "https://beta.naavre.net/naavre-catalogue-service/workflow-cells/8f674563-7965-421c-b997-fa3fc38a89cb/",
+            "owner": "zhanqing2016@gmail.com",
+            "virtual_lab": "waddenzee-proto-dt",
+            "shared_with_scopes": [],
+            "shared_with_users": [],
+            "base_container_image": {
+              "build": "ghcr.io/naavre/flavors/naavre-fl-lter-life-wadden-cell-build:v0.1.3",
+              "runtime": "ghcr.io/naavre/flavors/naavre-fl-lter-life-wadden-cell-runtime:v0.1.3"
+            },
+            "dependencies": [
+              {
+                "name": "aws.s3",
+                "module": "",
+                "asname": null
+              }
+            ],
+            "inputs": [
+              {
+                "name": "run_indices_sub",
+                "type": "list"
+              }
+            ],
+            "outputs": [],
+            "confs": [],
+            "params": [],
+            "secrets": [
+              {
+                "name": "secret_minio_access_key",
+                "type": "str"
+              },
+              {
+                "name": "secret_minio_secret_key",
+                "type": "str"
+              }
+            ],
+            "title": "c2-tempsed-ensemble-zhanqing2016-gmail-com",
+            "description": "c2-tempsed-ensemble-zhanqing2016-gmail-com",
+            "created": "2026-01-23T09:54:31.658918Z",
+            "modified": "2026-01-23T09:54:31.865432Z",
+            "version": 7,
+            "container_image": "ghcr.io/naavre/cells-vl-waddenzee-proto-dt/c2-tempsed-ensemble-zhanqing2016-gmail-com:8b8c50f",
+            "kernel": "IRkernel",
+            "source_url": "https://github.com/NaaVRE/cells-vl-waddenzee-proto-dt/tree/ba6b8eb9c28b8dfe62cbf831bfdee00d9412f713/c2-tempsed-ensemble-zhanqing2016-gmail-com",
+            "is_draft": false,
+            "next_version": null
+          }
+        },
+        "size": {
+          "width": 252,
+          "height": 61
+        }
+      }
+    },
+    "links": {
+      "8d6453a3-a37b-48f0-bedb-701b2fb3a758": {
+        "id": "8d6453a3-a37b-48f0-bedb-701b2fb3a758",
+        "from": {
+          "nodeId": "dfe8dee0-492b-4f2f-a241-d27e7bbb24ad",
+          "portId": "run_indices_sub"
+        },
+        "to": {
+          "nodeId": "e90ff44e-83dc-4d95-b8d4-2a5dc747152d",
+          "portId": "run_indices_sub"
+        }
+      }
+    },
+    "selected": {},
+    "hovered": {}
+  }
+}
